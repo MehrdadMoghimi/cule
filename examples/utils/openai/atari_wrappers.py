@@ -1,8 +1,22 @@
 import numpy as np
 from collections import deque
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 import cv2
+
+import ale_py
+
+gym.register_envs(ale_py)
+
+def translate_env_id(env_id):
+    """Map legacy Gym Atari ids (e.g. 'PongNoFrameskip-v4') to Gymnasium
+    ALE ids (e.g. 'ALE/Pong-v5'). Gymnasium-style ids pass through."""
+    if env_id.startswith('ALE/'):
+        return env_id
+    base = env_id.split('-')[0]
+    for suffix in ('NoFrameskip', 'Deterministic'):
+        base = base.replace(suffix, '')
+    return 'ALE/{}-v5'.format(base)
 
 class TimeLimitEnv(gym.Wrapper):
     def __init__(self, env, max_episode_steps=None):
@@ -11,12 +25,11 @@ class TimeLimitEnv(gym.Wrapper):
         self._elapsed_steps = 0
 
     def step(self, action):
-        obs, reward, done, info = self.env.step(action)
+        obs, reward, terminated, truncated, info = self.env.step(action)
         self._elapsed_steps += 1
         if self._elapsed_steps >= self._max_episode_steps:
-            done = True
-            info['TimeLimit.truncated'] = True
-        return obs, reward, done, info
+            truncated = True
+        return obs, reward, terminated, truncated, info
 
     def reset(self, **kwargs):
         self._elapsed_steps = 0
@@ -35,18 +48,17 @@ class NoopResetEnv(gym.Wrapper):
 
     def reset(self, **kwargs):
         """ Do no-op action for a number of steps in [1, noop_max]."""
-        self.env.reset(**kwargs)
+        obs, info = self.env.reset(**kwargs)
         if self.override_num_noops is not None:
             noops = self.override_num_noops
         else:
-            noops = self.unwrapped.np_random.randint(1, self.noop_max + 1) #pylint: disable=E1101
+            noops = int(self.unwrapped.np_random.integers(1, self.noop_max + 1))
         assert noops > 0
-        obs = None
         for _ in range(noops):
-            obs, _, done, _ = self.env.step(self.noop_action)
-            if done:
-                obs = self.env.reset(**kwargs)
-        return obs
+            obs, _, terminated, truncated, info = self.env.step(self.noop_action)
+            if terminated or truncated:
+                obs, info = self.env.reset(**kwargs)
+        return obs, info
 
 class FireResetEnv(gym.Wrapper):
     def __init__(self, env):
@@ -57,13 +69,13 @@ class FireResetEnv(gym.Wrapper):
 
     def reset(self, **kwargs):
         self.env.reset(**kwargs)
-        obs, _, done, _ = self.env.step(1)
-        if done:
+        obs, _, terminated, truncated, info = self.env.step(1)
+        if terminated or truncated:
             self.env.reset(**kwargs)
-        obs, _, done, _ = self.env.step(2)
-        if done:
-            self.env.reset(**kwargs)
-        return obs
+        obs, _, terminated, truncated, info = self.env.step(2)
+        if terminated or truncated:
+            obs, info = self.env.reset(**kwargs)
+        return obs, info
 
 class EpisodicLifeEnv(gym.Wrapper):
     def __init__(self, env):
@@ -75,8 +87,8 @@ class EpisodicLifeEnv(gym.Wrapper):
         self.was_real_done  = True
 
     def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        self.was_real_done = done
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        self.was_real_done = terminated or truncated
         # check current lives, make loss of life terminal,
         # then update lives to handle bonus lives
         lives = self.env.unwrapped.ale.lives()
@@ -84,9 +96,9 @@ class EpisodicLifeEnv(gym.Wrapper):
             # for Qbert sometimes we stay in lives == 0 condtion for a few frames
             # so its important to keep lives > 0, so that we only reset once
             # the environment advertises done.
-            done = True
+            terminated = True
         self.lives = lives
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info
 
     def reset(self, **kwargs):
         """Reset only when lives are exhausted.
@@ -94,12 +106,12 @@ class EpisodicLifeEnv(gym.Wrapper):
         and the learner need not know about any of this behind-the-scenes.
         """
         if self.was_real_done:
-            obs = self.env.reset(**kwargs)
+            obs, info = self.env.reset(**kwargs)
         else:
             # no-op step to advance from terminal/lost life state
-            obs, _, _, _ = self.env.step(0)
+            obs, _, _, _, info = self.env.step(0)
         self.lives = self.env.unwrapped.ale.lives()
-        return obs
+        return obs, info
 
 class MaxAndSkipEnv(gym.Wrapper):
     def __init__(self, env, skip=4):
@@ -112,22 +124,23 @@ class MaxAndSkipEnv(gym.Wrapper):
     def step(self, action):
         """Repeat action, sum reward, and max over last observations."""
         total_reward = 0.0
-        done = None
+        terminated = truncated = False
+        info = {}
         for i in range(self._skip):
-            obs, reward, done, info = self.env.step(action)
+            obs, reward, terminated, truncated, info = self.env.step(action)
             if i == self._skip - 2: self._obs_buffer[0] = obs
             if i == self._skip - 1: self._obs_buffer[1] = obs
             total_reward += reward
-            if done:
+            if terminated or truncated:
                 break
         # Note that the observation on the done=True frame
         # doesn't matter
         max_frame = self._obs_buffer.max(axis=0)
 
-        return max_frame, total_reward, done, info
+        return max_frame, total_reward, terminated, truncated, info
 
 class ClipRewardEnv(gym.RewardWrapper):
-    def _reward(self, reward):
+    def reward(self, reward):
         """Bin reward to {+1, 0, -1} by its sign."""
         return np.sign(reward)
 
@@ -137,7 +150,7 @@ class WarpFrame(gym.ObservationWrapper):
         gym.ObservationWrapper.__init__(self, env)
         self.width = 84
         self.height = 84
-        self.observation_space = spaces.Box(low=0, high=255, shape=(self.height, self.width, 1))
+        self.observation_space = spaces.Box(low=0, high=255, shape=(self.height, self.width, 1), dtype=np.uint8)
 
     def observation(self, frame):
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
@@ -156,18 +169,18 @@ class FrameStack(gym.Wrapper):
         self.k = k
         self.frames = deque([], maxlen=k)
         shp = env.observation_space.shape
-        self.observation_space = spaces.Box(low=0, high=255, shape=(shp[0], shp[1], shp[2] * k))
+        self.observation_space = spaces.Box(low=0, high=255, shape=(shp[0], shp[1], shp[2] * k), dtype=np.uint8)
 
-    def reset(self):
-        ob = self.env.reset()
+    def reset(self, **kwargs):
+        ob, info = self.env.reset(**kwargs)
         for _ in range(self.k):
             self.frames.append(ob)
-        return self._get_ob()
+        return self._get_ob(), info
 
     def step(self, action):
-        ob, reward, done, info = self.env.step(action)
+        ob, reward, terminated, truncated, info = self.env.step(action)
         self.frames.append(ob)
-        return self._get_ob(), reward, done, info
+        return self._get_ob(), reward, terminated, truncated, info
 
     def _get_ob(self):
         assert len(self.frames) == self.k
@@ -194,9 +207,34 @@ class LazyFrames(object):
             out = out.astype(dtype)
         return out
 
+class OldAPIEnv(gym.Wrapper):
+    """Present the classic Gym API (4-tuple step, obs-only reset) expected by
+    the training loops, on top of a Gymnasium environment."""
+    def __init__(self, env, seed=None):
+        gym.Wrapper.__init__(self, env)
+        self._seed = seed
+
+    def seed(self, seed):
+        self._seed = seed
+
+    def reset(self, **kwargs):
+        if self._seed is not None:
+            kwargs.setdefault('seed', int(self._seed))
+            self._seed = None
+        obs, _ = self.env.reset(**kwargs)
+        return obs
+
+    def step(self, action):
+        action = int(np.asarray(action).reshape(-1)[0])
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        info['ale.lives'] = self.env.unwrapped.ale.lives()
+        return obs, reward, terminated or truncated, info
+
 def make_atari(env_id):
-    env = gym.make(env_id)
-    assert 'NoFrameskip' in env.spec.id
+    # frameskip=1 / no sticky actions replicate the legacy 'NoFrameskip-v4'
+    # behavior on the Gymnasium 'ALE/*-v5' registrations
+    env = gym.make(translate_env_id(env_id), frameskip=1,
+                   repeat_action_probability=0.0, full_action_space=False)
     env = NoopResetEnv(env, noop_max=30)
     env = MaxAndSkipEnv(env, skip=4)
     return env

@@ -1,0 +1,16 @@
+# Runtime + examples dependencies. Install torch first (pick the wheel
+# matching your CUDA setup: https://pytorch.org/get-started/locally/).
+torch
+gymnasium
+ale-py
+numpy
+opencv-python-headless
+cloudpickle
+matplotlib
+psutil
+pytz
+tensorboard
+tqdm
+
+# tests
+pytest

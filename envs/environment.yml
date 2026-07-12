@@ -1,9 +1,18 @@
 name: cule
 channels:
-        - pytorch
+        - conda-forge
 dependencies:
-        - matplotlib
-        - pytorch
+        - python=3.12
+        - pip
         - pip:
-                - gym[atari]
-                - opencv-python
+                - torch
+                - gymnasium
+                - ale-py
+                - numpy
+                - matplotlib
+                - opencv-python-headless
+                - tqdm
+                - psutil
+                - pytz
+                - tensorboard
+                - cloudpickle

@@ -56,9 +56,6 @@ def worker(gpu, ngpus_per_node, args):
         total_time = 0
         evaluation_offset = 0
 
-    # Creates once at the beginning of training
-    scaler = torch.cuda.amp.GradScaler()
-
     for update in iterator:
 
         T = args.world_size * update * num_frames_per_iter

@@ -246,11 +246,17 @@ struct preprocess_functor
         const bool is_started  = s.tiaFlags[FLAG_ALE_STARTED];
         if(last_frame && is_started && is_terminal)
         {
-            CULE_ASSERT(cached_tia_update_buffer != nullptr);
-            CULE_ASSERT(cache_index_buffer != nullptr);
-
             s.tiaFlags.clear(FLAG_ALE_TERMINAL);
-            fs.srcBuffer = cached_tia_update_buffer + (cache_index_buffer[self.index()] * ENV_UPDATE_SIZE);
+
+            // During the noop-cache build in reset() no cache exists yet and
+            // games whose terminal check reads uninitialized RAM (e.g. a
+            // lives counter of 0 during the boot frames) reach this branch;
+            // render from the live TIA buffer instead of a cached frame.
+            if(cached_tia_update_buffer != nullptr)
+            {
+                CULE_ASSERT(cache_index_buffer != nullptr);
+                fs.srcBuffer = cached_tia_update_buffer + (cache_index_buffer[self.index()] * ENV_UPDATE_SIZE);
+            }
         }
         fs.framePointer = frame_buffer == nullptr ? nullptr : &frame_buffer[self.index() * 300 * SCREEN_WIDTH];
 

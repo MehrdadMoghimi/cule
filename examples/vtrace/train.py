@@ -39,7 +39,7 @@ def worker(gpu, ngpus_per_node, args):
 
         benchmark_steps = 100
 
-    double_testing = True
+    double_testing = args.double_test
 
     # openai and cule testing
     if double_testing == False:
@@ -275,11 +275,11 @@ def worker(gpu, ngpus_per_node, args):
         if args.benchmark:
             if update < (benchmark_steps - 1):
                 for step in range(0, args.num_steps_per_update):
-                    states[:-1, :, :, :, :] = states[1:, :, :, : ,:]
-                    rewards[:-1, :] = rewards[1:, :]
-                    actions[:-1, :] = actions[1:, :]
-                    masks[:-1, :] = masks[1:, :]
-                    mus[:-1, :] = mus[1:, :]
+                    states[:-1, :, :, :, :] = states[1:, :, :, : ,:].clone()
+                    rewards[:-1, :] = rewards[1:, :].clone()
+                    actions[:-1, :] = actions[1:, :].clone()
+                    masks[:-1, :] = masks[1:, :].clone()
+                    mus[:-1, :] = mus[1:, :].clone()
                 continue
             if update == (benchmark_steps - 1):
                 torch.cuda.current_stream().synchronize()
@@ -337,10 +337,10 @@ def worker(gpu, ngpus_per_node, args):
         nvtx.range_push('train:next_states')
         for step in range(0, args.num_steps_per_update):
             states[:-1] = states[1:].clone()
-            rewards[:-1] = rewards[1:]
-            actions[:-1] = actions[1:]
-            masks[:-1] = masks[1:]
-            mus[:-1] = mus[1:]
+            rewards[:-1] = rewards[1:].clone()
+            actions[:-1] = actions[1:].clone()
+            masks[:-1] = masks[1:].clone()
+            mus[:-1] = mus[1:].clone()
         nvtx.range_pop()
 
         torch.cuda.synchronize()
@@ -376,7 +376,7 @@ def worker(gpu, ngpus_per_node, args):
                 break
 
     if args.plot and (args.rank == 0):
-        writer.close()
+        summary_writer.close()
 
     if args.use_openai:
         train_env.close()

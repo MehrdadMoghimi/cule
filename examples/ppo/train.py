@@ -18,20 +18,16 @@ from a2c.test import test
 class data_prefetcher():
     def __init__(self, loader):
         self.loader = iter(loader)
-        self.stream = torch.cuda.Stream()
         self.preload()
 
     def preload(self):
-        with torch.cuda.stream(self.stream):
-            try:
-                self.next_states, self.next_actions, self.next_action_log_probs, self.next_returns, self.next_advantages = next(self.loader)
-            except StopIteration:
-                self.next_states, self.next_actions, self.next_action_log_probs, self.next_returns, self.next_advantages = None, None, None, None, None
-                return
+        try:
+            self.next_states, self.next_actions, self.next_action_log_probs, self.next_returns, self.next_advantages = next(self.loader)
+        except StopIteration:
+            self.next_states, self.next_actions, self.next_action_log_probs, self.next_returns, self.next_advantages = None, None, None, None, None
+            return
 
     def next(self):
-        torch.cuda.current_stream().wait_stream(self.stream)
-
         states = self.next_states
         actions = self.next_actions
         action_log_probs = self.next_action_log_probs
@@ -86,8 +82,6 @@ def worker(gpu, ngpus_per_node, args):
         iterator = tqdm(iterator)
         total_time = 0
         evaluation_offset = 0
-
-    train_stream = torch.cuda.Stream()
 
     torch.cuda.synchronize()
 
@@ -199,43 +193,44 @@ def worker(gpu, ngpus_per_node, args):
                                                    num_workers=0, pin_memory=False, sampler=train_sampler)
         nvtx.range_pop()
 
-        with torch.cuda.stream(train_stream):
-            for epoch in range(args.ppo_epoch):
-                nvtx.range_push('train:epoch_step')
+        # runs on the default stream: the dataset tensors are shared with the
+        # rollout code above and side streams here corrupt allocator state
+        for epoch in range(args.ppo_epoch):
+            nvtx.range_push('train:epoch_step')
 
-                if args.distributed:
-                    train_sampler.set_epoch(epoch)
+            if args.distributed:
+                train_sampler.set_epoch(epoch)
 
-                prefetcher = data_prefetcher(train_loader)
+            prefetcher = data_prefetcher(train_loader)
+            local_states, local_actions, local_action_log_probs, local_returns, local_advantages = prefetcher.next()
+
+            while local_states is not None:
+                batch_values, batch_logits = model(local_states)
+                batch_log_probs = F.log_softmax(batch_logits, dim=1)
+                batch_action_log_probs = batch_log_probs.gather(1, local_actions.unsqueeze(-1))
+
+                batch_probs = F.softmax(batch_logits, dim=1)
+                batch_dist_entropy = -(batch_log_probs * batch_probs).sum(-1).mean()
+
+                ratio = torch.exp(batch_action_log_probs - local_action_log_probs)
+                surrogate1 = ratio * local_advantages
+                surrogate2 = torch.clamp(ratio, 1.0 - args.clip_epsilon, 1.0 + args.clip_epsilon) * local_advantages
+                batch_policy_loss = -torch.min(surrogate1, surrogate2).mean()
+                batch_value_loss = F.mse_loss(local_returns.unsqueeze(-1), batch_values) / 2.0
+
+                loss = batch_value_loss * args.value_loss_coef + batch_policy_loss - batch_dist_entropy * args.entropy_coef
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                optimizer.step()
+
+                total_value_loss += batch_value_loss.item()
+                total_policy_loss += batch_policy_loss.item()
+                total_dist_entropy += batch_dist_entropy.item()
+
                 local_states, local_actions, local_action_log_probs, local_returns, local_advantages = prefetcher.next()
-
-                while local_states is not None:
-                    batch_values, batch_logits = model(local_states)
-                    batch_log_probs = F.log_softmax(batch_logits, dim=1)
-                    batch_action_log_probs = batch_log_probs.gather(1, local_actions.unsqueeze(-1))
-
-                    batch_probs = F.softmax(batch_logits, dim=1)
-                    batch_dist_entropy = -(batch_log_probs * batch_probs).sum(-1).mean()
-
-                    ratio = torch.exp(batch_action_log_probs - local_action_log_probs)
-                    surrogate1 = ratio * local_advantages
-                    surrogate2 = torch.clamp(ratio, 1.0 - args.clip_epsilon, 1.0 + args.clip_epsilon) * local_advantages
-                    batch_policy_loss = -torch.min(surrogate1, surrogate2).mean()
-                    batch_value_loss = F.mse_loss(local_returns.unsqueeze(-1), batch_values) / 2.0
-
-                    loss = batch_value_loss * args.value_loss_coef + batch_policy_loss - batch_dist_entropy * args.entropy_coef
-                    optimizer.zero_grad()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                    optimizer.step()
-
-                    total_value_loss += batch_value_loss.item()
-                    total_policy_loss += batch_policy_loss.item()
-                    total_dist_entropy += batch_dist_entropy.item()
-
-                    local_states, local_actions, local_action_log_probs, local_returns, local_advantages = prefetcher.next()
-                scheduler.step()
-                nvtx.range_pop()
+            scheduler.step()
+            nvtx.range_pop()
 
         torch.cuda.synchronize()
 
@@ -250,19 +245,19 @@ def worker(gpu, ngpus_per_node, args):
             dist_entropy = total_dist_entropy / (args.ppo_epoch * args.num_minibatches)
 
             if args.plot:
-                writer.add_scalar('train/rewards_mean', final_rewards.mean().item(), T, walltime=total_time)
-                writer.add_scalar('train/lengths_mean', final_lengths.mean().item(), T, walltime=total_time)
-                writer.add_scalar('train/learning_rate', scheduler.get_lr()[0], T, walltime=total_time)
-                writer.add_scalar('train/value_loss', value_loss, T, walltime=total_time)
-                writer.add_scalar('train/policy_loss', policy_loss, T, walltime=total_time)
-                writer.add_scalar('train/entropy', dist_entropy, T, walltime=total_time)
+                summary_writer.add_scalar('train/rewards_mean', final_rewards.mean().item(), T, walltime=total_time)
+                summary_writer.add_scalar('train/lengths_mean', final_lengths.mean().item(), T, walltime=total_time)
+                summary_writer.add_scalar('train/learning_rate', scheduler.get_last_lr()[0], T, walltime=total_time)
+                summary_writer.add_scalar('train/value_loss', value_loss, T, walltime=total_time)
+                summary_writer.add_scalar('train/policy_loss', policy_loss, T, walltime=total_time)
+                summary_writer.add_scalar('train/entropy', dist_entropy, T, walltime=total_time)
 
             progress_data = callback(args, model, T, iter_time, final_rewards, final_lengths,
                                      value_loss, policy_loss, dist_entropy, train_csv_writer, train_csv_file)
             iterator.set_postfix_str(progress_data)
 
     if args.plot and (args.rank == 0):
-        writer.close()
+        summary_writer.close()
 
     if args.use_openai:
         train_env.close()

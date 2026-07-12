@@ -17,6 +17,10 @@ def vtrace_parser_options(parser):
     parser.add_argument('--num-steps-per-update', type=int, default=1, help='number of steps per update (default: 1)')
 
     parser.add_argument('--benchmark', action='store_true', help='Special case: benchmark')
+    parser.add_argument('--double-test', action='store_true', default=False,
+                        help='Evaluate on both the CuLE CPU and Gymnasium (ale-py) test '
+                             'environments at every evaluation interval (slower; useful '
+                             'to cross-validate CuLE against the reference emulator)')
 
     return parser
 

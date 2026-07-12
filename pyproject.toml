@@ -1,0 +1,13 @@
+# NOTE: building requires --no-build-isolation (setup.py imports torch to
+# detect GPU architectures), e.g.:
+#   CUDA_HOME=/usr/local/cuda-12.9 pip install --no-build-isolation -e .
+[build-system]
+requires = ["setuptools>=64", "wheel", "torch"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: end-to-end training micro-runs (deselected by default; run with -m slow)",
+]

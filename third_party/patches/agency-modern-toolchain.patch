@@ -1,0 +1,352 @@
+diff --git a/agency/detail/operator_traits.hpp b/agency/detail/operator_traits.hpp
+index 7769c1fd..5688b8a7 100644
+--- a/agency/detail/operator_traits.hpp
++++ b/agency/detail/operator_traits.hpp
+@@ -48,120 +48,208 @@ no operator>(any, any);
+ no operator>=(any, any);
+ 
+ 
++template<typename T1, typename T2>
++struct operator_plus_expr_result
++{
++  using type = decltype(std::declval<T1>() + std::declval<T2>());
++};
++
++
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_plus
+   : is_different<
+-      decltype(std::declval<T1>() + std::declval<T2>()),
++      typename operator_plus_expr_result<T1,T2>::type,
+       no
+     >
+ {
+ };
+ 
+ 
++template<typename T1, typename T2>
++struct operator_plus_assign_expr_result
++{
++  using type = decltype(std::declval<T1&>() += std::declval<T2>());
++};
++
++
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_plus_assign
+   : is_different<
+-      decltype(std::declval<T1&>() += std::declval<T2>()),
++      typename operator_plus_assign_expr_result<T1,T2>::type,
+       no
+     >
+ {
+ };
+ 
+ 
++template<typename T1, typename T2>
++struct operator_minus_expr_result
++{
++  using type = decltype(std::declval<T1>() - std::declval<T2>());
++};
++
++
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_minus
+   : is_different<
+-      decltype(std::declval<T1>() - std::declval<T2>()),
++      typename operator_minus_expr_result<T1,T2>::type,
+       no
+     >
+ {
+ };
+ 
+ 
++template<typename T1, typename T2>
++struct operator_minus_assign_expr_result
++{
++  using type = decltype(std::declval<T1&>() -= std::declval<T2>());
++};
++
++
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_minus_assign
+   : is_different<
+-      decltype(std::declval<T1&>() -= std::declval<T2>()),
++      typename operator_minus_assign_expr_result<T1,T2>::type,
+       no
+     >
+ {
+ };
+ 
+ 
++template<typename T1, typename T2>
++struct operator_multiplies_expr_result
++{
++  using type = decltype(std::declval<T1>() * std::declval<T2>());
++};
++
++
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_multiplies
+   : is_different<
+-      decltype(std::declval<T1>() * std::declval<T2>()),
++      typename operator_multiplies_expr_result<T1,T2>::type,
+       no
+     >
+ {
+ };
+ 
+ 
++template<typename T1, typename T2>
++struct operator_multiplies_assign_expr_result
++{
++  using type = decltype(std::declval<T1&>() *= std::declval<T2>());
++};
++
++
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_multiplies_assign
+   : is_different<
+-      decltype(std::declval<T1&>() *= std::declval<T2>()),
++      typename operator_multiplies_assign_expr_result<T1,T2>::type,
+       no
+     >
+ {
+ };
+ 
+ 
++template<typename T1, typename T2>
++struct operator_divides_expr_result
++{
++  using type = decltype(std::declval<T1>() / std::declval<T2>());
++};
++
++
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_divides
+   : is_different<
+-      decltype(std::declval<T1>() / std::declval<T2>()),
++      typename operator_divides_expr_result<T1,T2>::type,
+       no
+     >
+ {
+ };
+ 
+ 
++template<typename T1, typename T2>
++struct operator_divides_assign_expr_result
++{
++  using type = decltype(std::declval<T1&>() /= std::declval<T2>());
++};
++
++
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_divides_assign
+   : is_different<
+-      decltype(std::declval<T1&>() /= std::declval<T2>()),
++      typename operator_divides_assign_expr_result<T1,T2>::type,
+       no
+     >
+ {
+ };
+ 
+ 
++template<typename T1, typename T2>
++struct operator_less_expr_result
++{
++  using type = decltype(std::declval<T1>() < std::declval<T2>());
++};
++
++
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_less
+   : is_different<
+-      decltype(std::declval<T1>() < std::declval<T2>()),
++      typename operator_less_expr_result<T1,T2>::type,
+       no
+     >
+-{};
++{
++};
++
++
++template<typename T1, typename T2>
++struct operator_less_equal_expr_result
++{
++  using type = decltype(std::declval<T1>() <= std::declval<T2>());
++};
+ 
+ 
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_less_equal
+   : is_different<
+-      decltype(std::declval<T1>() <= std::declval<T2>()),
++      typename operator_less_equal_expr_result<T1,T2>::type,
+       no
+     >
+-{};
++{
++};
++
++
++template<typename T1, typename T2>
++struct operator_greater_expr_result
++{
++  using type = decltype(std::declval<T1>() > std::declval<T2>());
++};
+ 
+ 
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_greater
+   : is_different<
+-      decltype(std::declval<T1>() > std::declval<T2>()),
++      typename operator_greater_expr_result<T1,T2>::type,
+       no
+     >
+-{};
++{
++};
++
++
++template<typename T1, typename T2>
++struct operator_greater_equal_expr_result
++{
++  using type = decltype(std::declval<T1>() >= std::declval<T2>());
++};
+ 
+ 
+ template<typename T1, typename T2 = T1, typename Result = ignore>
+ struct has_operator_greater_equal
+   : is_different<
+-      decltype(std::declval<T1>() >= std::declval<T2>()),
++      typename operator_greater_equal_expr_result<T1,T2>::type,
+       no
+     >
+-{};
++{
++};
+ 
+ 
+ template<typename, typename, typename Enable = void> struct operator_plus_result {};
+diff --git a/agency/detail/tuple/arithmetic_tuple_facade.hpp b/agency/detail/tuple/arithmetic_tuple_facade.hpp
+index 0e0c2bb5..6b9c58a8 100644
+--- a/agency/detail/tuple/arithmetic_tuple_facade.hpp
++++ b/agency/detail/tuple/arithmetic_tuple_facade.hpp
+@@ -16,6 +16,19 @@ template<typename Derived>
+ class arithmetic_tuple_facade;
+ 
+ 
++// SFINAE-friendly variant of std::tuple_size: evaluates to an invalid size
++// instead of a hard error when T is not tuple-like (needed for GCC >= 9,
++// where std::tuple_size<T> on a non-tuple T is an incomplete type error
++// inside these operators' enable_if constraints)
++template<class T, class = void>
++struct facade_tuple_size : std::integral_constant<std::size_t, std::size_t(-1)> {};
++
++template<class T>
++struct facade_tuple_size<T, typename std::enable_if<(sizeof(std::tuple_size<T>) > 0)>::type>
++  : std::tuple_size<T>
++{};
++
++
+ template<class T>
+ struct is_arithmetic_tuple : std::is_base_of<arithmetic_tuple_facade<T>, T> {};
+ 
+@@ -156,7 +169,7 @@ template<typename Derived>
+ 
+     template<class ArithmeticTuple,
+              class = typename std::enable_if<
+-               std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++               std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+              >::type>
+     __AGENCY_ANNOTATION
+     void copy(const ArithmeticTuple& src)
+@@ -169,7 +182,7 @@ template<typename Derived>
+   // fused op-assignment
+   template<class ArithmeticTuple,
+            class = typename std::enable_if<
+-             std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++             std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+            >::type>
+   __AGENCY_ANNOTATION Derived& operator*=(const ArithmeticTuple& rhs)
+   {
+@@ -179,7 +192,7 @@ template<typename Derived>
+ 
+   template<class ArithmeticTuple,
+            class = typename std::enable_if<
+-             std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++             std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+            >::type>
+   __AGENCY_ANNOTATION Derived& operator/=(const ArithmeticTuple& rhs)
+   {
+@@ -189,7 +202,7 @@ template<typename Derived>
+ 
+   template<class ArithmeticTuple,
+            class = typename std::enable_if<
+-             std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++             std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+            >::type>
+   __AGENCY_ANNOTATION Derived& operator%=(const ArithmeticTuple& rhs)
+   {
+@@ -199,7 +212,7 @@ template<typename Derived>
+ 
+   template<class ArithmeticTuple,
+            class = typename std::enable_if<
+-             std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++             std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+            >::type>
+   __AGENCY_ANNOTATION Derived& operator+=(const ArithmeticTuple& rhs)
+   {
+@@ -209,7 +222,7 @@ template<typename Derived>
+ 
+   template<class ArithmeticTuple,
+            class = typename std::enable_if<
+-             std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++             std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+            >::type>
+   __AGENCY_ANNOTATION Derived& operator-=(const ArithmeticTuple& rhs)
+   {
+@@ -248,7 +261,7 @@ template<typename Derived>
+   // ops
+   template<class ArithmeticTuple,
+            class = typename std::enable_if<
+-             std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++             std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+            >::type>
+   __AGENCY_ANNOTATION
+   Derived operator+(const ArithmeticTuple& rhs) const
+@@ -260,7 +273,7 @@ template<typename Derived>
+ 
+   template<class ArithmeticTuple,
+            class = typename std::enable_if<
+-             std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++             std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+            >::type>
+   __AGENCY_ANNOTATION
+   Derived operator-(const ArithmeticTuple& rhs) const
+@@ -272,7 +285,7 @@ template<typename Derived>
+ 
+   template<class ArithmeticTuple,
+            class = typename std::enable_if<
+-             std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++             std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+            >::type>
+   __AGENCY_ANNOTATION
+   Derived operator*(const ArithmeticTuple& rhs) const
+@@ -284,7 +297,7 @@ template<typename Derived>
+ 
+   template<class ArithmeticTuple,
+            class = typename std::enable_if<
+-             std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++             std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+            >::type>
+   __AGENCY_ANNOTATION
+   Derived operator/(const ArithmeticTuple& rhs) const
+@@ -296,7 +309,7 @@ template<typename Derived>
+ 
+   template<class ArithmeticTuple,
+            class = typename std::enable_if<
+-             std::tuple_size<Derived>::value == std::tuple_size<ArithmeticTuple>::value
++             std::tuple_size<Derived>::value == facade_tuple_size<ArithmeticTuple>::value
+            >::type>
+   __AGENCY_ANNOTATION
+   Derived operator%(const ArithmeticTuple& rhs) const

@@ -13,12 +13,8 @@ import warnings
 
 from pprint import pprint
 
-if sys.version_info.major == 2:
-    import ConfigParser as configparser
-    from distutils.spawn import find_executable
-else:
-    from shutil import which as find_executable
-    import configparser
+from shutil import which as find_executable
+import configparser
 
 def add_global_parser_options(parser):
     parser.add_argument('--ale-start-steps', type=int, default=400, help='Number of steps used to initialize ALEs (default: 400)')
@@ -136,7 +132,7 @@ def main(add_extra_parser_options, worker):
     defaults = {}
 
     if args.conf_file:
-        config = configparser.SafeConfigParser()
+        config = configparser.ConfigParser()
         config.read(args.conf_file)
         defaults.update(dict(config.items('Defaults')))
         for key, value in [(k,v.lower()) for k,v in defaults.items()]:

@@ -1,7 +1,7 @@
-import gym
-from gym.spaces import Box
+import gymnasium as gym
+from gymnasium.spaces import Box
 
-from .atari_wrappers import make_atari, wrap_deepmind
+from .atari_wrappers import make_atari, wrap_deepmind, OldAPIEnv
 from .subproc_vec_env import SubprocVecEnv
 
 class WrapPyTorch(gym.ObservationWrapper):
@@ -15,11 +15,10 @@ class WrapPyTorch(gym.ObservationWrapper):
 def create_atari_env(env_id, seed=0, rank=0, episode_life=False, clip_rewards=False, deepmind=True, max_frames=18000):
     def _thunk():
         env = make_atari(env_id)
-        env.seed(seed + rank)
         if deepmind:
-            env = wrap_deepmind(env, episode_life=episode_life, clip_rewards=clip_rewards)
+            env = wrap_deepmind(env, episode_life=episode_life, clip_rewards=clip_rewards, max_frames=max_frames)
             env = WrapPyTorch(env)
-        return env
+        return OldAPIEnv(env, seed=seed + rank)
     return _thunk
 
 def create_vectorize_atari_env(env_id, seed, num_envs, episode_life=False, clip_rewards=False, deepmind=True, max_frames=18000):
@@ -30,4 +29,3 @@ def create_vectorize_atari_env(env_id, seed, num_envs, episode_life=False, clip_
                                            clip_rewards=clip_rewards,
                                            deepmind=deepmind,
                                            max_frames=max_frames) for proc_id in range(num_envs)])
-

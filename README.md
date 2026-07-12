@@ -15,31 +15,46 @@ bottleneck arising from the limited CPU-GPU communication bandwidth.
 
 # Compatibility
 
-CuLE performs best when compiled with the [CUDA 10.0 Toolkit](https://developer.nvidia.com/cuda-toolkit).
-It is currently incompatible with CUDA 10.1.
+This fork is updated for modern software stacks: it compiles with the
+[CUDA 12.x Toolkit](https://developer.nvidia.com/cuda-toolkit) and runs against
+current PyTorch releases. The legacy `gym`/`atari_py` dependencies were replaced
+with [Gymnasium](https://gymnasium.farama.org) and
+[ale-py](https://github.com/Farama-Foundation/Arcade-Learning-Environment)
+(Atari ROMs are bundled with ale-py — no separate ROM installation needed).
+See [CHANGES.md](CHANGES.md) for the complete list of differences from
+upstream NVlabs/cule, including several upstream bug fixes.
 
-We have tested the following environments.
+We have tested the following environment.
 
-|**Operating System** | **Compiler** |
-|-----------------|----------|
-| Ubuntu 16.04 | GCC 5.4.0 |
-| Ubuntu 18.04 | GCC 7.3.0 |
+|**Operating System** | **Compiler** | **CUDA** | **Python / PyTorch** |
+|-----------------|----------|------|------------------|
+| Ubuntu 22.04 (WSL2) | GCC 11.4 | 12.9 | 3.12 / torch 2.13 (cu130) |
 
-CuLE runs successfully on the following NVIDIA GPUs, and it is expected to be efficient on
-any Maxwell-, Pascal-, Volta-, and Turing-architecture NVIDIA GPUs.
-
-|**GPU**|
-|---|
-|NVIDIA Tesla P100|
-|NVIDIA Tesla V100|
-|NVIDIA TitanV|
+CuLE runs on Maxwell- through Ada/Hopper-architecture NVIDIA GPUs (tested on an
+RTX 4090, sm_89). The build targets the compute capability of the GPUs detected
+at compile time.
 
 # Building CuLE
 
 ```
 $ git clone --recursive https://github.com/NVlabs/cule
-$ python setup.py install
+$ cd cule
+$ git -C third_party/pybind11 fetch --tags && git -C third_party/pybind11 checkout v2.13.6
+$ pip install torch gymnasium ale-py opencv-python-headless tqdm psutil pytz tensorboard cloudpickle
+$ CUDA_HOME=/usr/local/cuda-12.9 pip install --no-build-isolation -e .
 ```
+
+Notes:
+- `CUDA_HOME` should point to a CUDA 12.x toolkit whose `nvcc` supports your GPU.
+- `--no-build-isolation` is required because `setup.py` queries the local torch
+  installation for the GPU architectures to compile for.
+- The extension does not link against libtorch, so the toolkit used to build it
+  does not need to match the CUDA version of the PyTorch wheels.
+- The pinned `pybind11` submodule commit predates Python 3.11 — check out a
+  modern release tag as shown above (setup.py errors out early otherwise).
+- The unmaintained `agency` submodule needs small fixes for GCC >= 9;
+  setup.py applies [third_party/patches/agency-modern-toolchain.patch](third_party/patches/agency-modern-toolchain.patch)
+  automatically when it is missing.
 
 # Project Structure
 
@@ -66,41 +81,131 @@ examples/
   visualize/
 ```
 
+# Running the examples
+
+All training scripts share the same core flags:
+
+- `--env-name <name>` — legacy Gym-style names (`PongNoFrameskip-v4`) and
+  Gymnasium names (`ALE/Pong-v5`) are both accepted.
+- `--use-cuda-env` — emulate the Atari environments on the GPU. Omit it to use
+  the CuLE CPU backend, or pass `--use-openai` to generate training data with
+  the reference gymnasium/ale-py emulator.
+- `--num-ales N` — number of parallel environments; use hundreds to thousands
+  with `--use-cuda-env`.
+- `--evaluation-interval N` — frames between evaluations. Each evaluation plays
+  10 full episodes on the CPU, so a small interval makes evaluation — not
+  training — dominate wall-clock time. The `training time` printed with the
+  evaluation results counts only time spent in training updates.
+
+**A2C + V-trace** (best throughput; from `examples/vtrace`):
+
+```
+python vtrace_main.py --env-name PongNoFrameskip-v4 --normalize --use-cuda-env --num-ales 1200 --num-steps 20 --num-steps-per-update 1 --num-minibatches 20 --t-max 8000000 --evaluation-interval 2000000
+```
+
+Add `--double-test` to additionally evaluate on the reference gymnasium
+emulator at every evaluation (doubles evaluation cost; useful to cross-check
+CuLE's emulation).
+
+**A2C** (from `examples/a2c`):
+
+```
+python a2c_main.py --env-name BreakoutNoFrameskip-v4 --use-cuda-env --num-ales 256 --num-steps 5 --t-max 8000000 --evaluation-interval 2000000
+```
+
+**PPO** (from `examples/ppo`):
+
+```
+python ppo_main.py --env-name SpaceInvadersNoFrameskip-v4 --use-cuda-env --num-ales 256 --num-steps 20 --t-max 8000000 --evaluation-interval 2000000
+```
+
+**DQN** (from `examples/dqn`):
+
+```
+python dqn_main.py --env-name SeaquestNoFrameskip-v4 --use-cuda-env --num-ales 32 --t-max 2000000 --memory-capacity 100000
+```
+
+**Visualize a trained or random policy** (from `examples/visualize`):
+
+```
+python animate.py --env-name BreakoutNoFrameskip-v4 --use-cuda --num-envs 16
+```
+
+### Supported games
+
+Any of the following can be passed to `--env-name`, either as
+`<CamelCaseName>NoFrameskip-v4` / `ALE/<CamelCaseName>-v5` or as the plain
+rom id shown here. These 44 games pass automated health checks (episodes
+terminate, rewards flow, no reset loops) on both the CPU and GPU backends:
+
+```
+adventure, air_raid, alien, amidar, asterix, asteroids, atlantis, beam_rider,
+bowling, boxing, breakout, carnival, chopper_command, crazy_climber,
+demon_attack, enduro, fishing_derby, freeway, frostbite, gopher, hero,
+ice_hockey, jamesbond, journey_escape, kaboom, kangaroo, krull,
+montezuma_revenge, name_this_game, phoenix, pong, pooyan, private_eye,
+riverraid, road_runner, robotank, seaquest, solaris, star_gunner, time_pilot,
+up_n_down, video_pinball, wizard_of_wor, zaxxon
+```
+
+The following games have **broken emulation inherited from upstream CuLE**
+(reset loops, episodes that never terminate, or garbage score decoding —
+the emulator's game-start handling does not replicate ALE's per-ROM logic;
+see [CHANGES.md](CHANGES.md)). They construct and run but are not usable for
+training:
+
+```
+assault, bank_heist, battle_zone, berzerk, centipede, defender, double_dunk,
+elevator_action, gravitar, kung_fu_master, ms_pacman, pitfall, qbert, skiing,
+space_invaders, tennis, tutankham, venture, yars_revenge
+```
+
+Other ale-py roms load as well, but without game-specific reward/lives
+decoding they are not useful for training.
+
+# Testing
+
+The repository ships a pytest suite covering ROM resolution, the CPU and GPU
+environment backends (shapes, rewards, determinism, several games across all
+supported cartridge formats), the Gymnasium wrapper stack, and end-to-end
+micro-training runs for every algorithm:
+
+```
+pip install pytest
+pytest              # fast checks (~1 minute; GPU tests auto-skip without CUDA)
+pytest -m slow      # end-to-end training micro-runs for a2c/vtrace/ppo/dqn
+```
+
 # Docker 
 
-The reccomended (and easiest) way of using CuLE is through Docker.
+The recommended (and easiest) way of using CuLE is through Docker.
 We assume nvidia-docker is already installed in your system.
 To build the CuLE image you can use the following docker file - create a file named "Dockerfile" in your preferred folder and copy the following text into it:
 
 ```
-FROM nvidia/cuda:10.0-cudnn7-devel-ubuntu18.04 as base
-RUN apt-get update
-RUN apt-get install -y python3.6
-RUN apt-get install -y python3-pip
-RUN ln -s /usr/bin/python3.6 /usr/bin/python
-RUN ln -s /usr/bin/pip3 /usr/bin/pip
-RUN apt-get -y install git
+FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
 
-RUN pip install torch==1.2.0
-RUN pip install torchvision==0.4.0
+ARG DEBIAN_FRONTEND=noninteractive
 
-RUN pip install psutil
-RUN pip install pytz
-RUN pip install tqdm
-RUN pip install atari_py
+RUN apt-get -y update && apt-get install -y --no-install-recommends \
+        build-essential git python3 python3-dev python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/NVIDIA/apex
-RUN pip install --upgrade pip
-RUN cd apex && pip install -v --global-option="--cpp_ext" --global-option="--cuda_ext" ./
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-RUN apt-get install -y libsm6 libxrender-dev
-RUN pip install opencv-python
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install torch gymnasium ale-py cloudpickle opencv-python-headless \
+                psutil pytz tensorboard tqdm
 
-RUN pip install cython
-RUN apt-get install zlib1g-dev
-RUN git clone --recursive https://github.com/NVLabs/cule
-RUN cd cule && python setup.py install
+RUN git clone -b master --recursive https://github.com/NVLabs/cule && \
+    cd cule && \
+    git -C third_party/pybind11 fetch --tags && \
+    git -C third_party/pybind11 checkout v2.13.6 && \
+    pip install --no-build-isolation .
 ```
+
+(The same file is available at [envs/Dockerfile](envs/Dockerfile).)
 
 Once the docker file has been created and saved, you can build the docker image by typing (in the same folder of the docker file):
 

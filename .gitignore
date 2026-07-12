@@ -20,3 +20,7 @@ dist
 # data files
 *.csv
 examples/*/runs
+
+# editor/IDE
+.vscode/
+.pytest_cache/

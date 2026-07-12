@@ -1,15 +1,17 @@
-import re
-import gym
 import os
 
+from ale_py import roms
+
 def atari_games():
-    pattern = re.compile('\w+NoFrameskip-v4')
-    return [env_spec.id for env_spec in gym.envs.registry.all() if pattern.match(env_spec.id)]
+    # legacy-style env names (e.g. 'SpaceInvadersNoFrameskip-v4') built from
+    # the ale-py rom ids (e.g. 'space_invaders')
+    return [''.join(part.title() for part in rom_id.split('_')) + 'NoFrameskip-v4'
+            for rom_id in roms.get_all_rom_ids()]
 
 env_names = atari_games()
-env_names.remove('QbertNoFrameskip-v4')
-env_names.remove('ElevatorActionNoFrameskip-v4')
-env_names.remove('DefenderNoFrameskip-v4')
+for skip in ['QbertNoFrameskip-v4', 'ElevatorActionNoFrameskip-v4', 'DefenderNoFrameskip-v4']:
+    if skip in env_names:
+        env_names.remove(skip)
 num_ales_list = [1024, 2048, 16, 4096] #[1, 32, 64, 128, 256, 512, 1024, 2048, 4096]
 
 for num_ales in num_ales_list:

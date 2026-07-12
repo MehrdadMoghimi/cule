@@ -47,7 +47,7 @@ def test(args, policy_net, env):
             # convert back to pytorch tensors
             observation = torch.from_numpy(observation)
             reward = torch.from_numpy(reward.astype(np.float32))
-            done = torch.from_numpy(done.astype(np.bool))
+            done = torch.from_numpy(done.astype(bool))
             new_lives = torch.IntTensor([d['ale.lives'] for d in info])
         else:
             new_lives = info['ale.lives'].clone()

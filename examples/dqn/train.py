@@ -33,15 +33,11 @@ class data_prefetcher():
         self.batch_size = batch_size
         self.device = device
         self.mem = mem
-        self.stream = torch.cuda.Stream()
 
     def preload(self):
-        with torch.cuda.stream(self.stream):
-            self.idxs, self.states, self.actions, self.returns, self.next_states, self.nonterminals, self.weights = self.mem.sample(self.batch_size)
+        self.idxs, self.states, self.actions, self.returns, self.next_states, self.nonterminals, self.weights = self.mem.sample(self.batch_size)
 
     def next(self):
-        torch.cuda.current_stream().wait_stream(self.stream)
-
         idxs = self.idxs.to(device=self.device)
         states = self.states.to(device=self.device)
         actions = self.actions.to(device=self.device)
@@ -219,9 +215,6 @@ def worker(gpu, ngpus_per_node, args):
         if args.rank == 0:
             iterator = tqdm(iterator)
 
-        env_stream = torch.cuda.Stream()
-        train_stream = torch.cuda.Stream()
-
         for update in iterator:
 
             T = args.world_size * update * num_frames_per_iter
@@ -245,42 +238,44 @@ def worker(gpu, ngpus_per_node, args):
 
             torch.cuda.synchronize()
 
-            with torch.cuda.stream(env_stream):
-                nvtx.range_push('train:env step')
-                observation, reward, done, info = train_env.step(action)  # Step
+            # note: everything runs on the default stream on purpose; tensors
+            # like `state` are shared with the model/replay code and juggling
+            # side streams here without record_stream() corrupts memory
+            nvtx.range_push('train:env step')
+            observation, reward, done, info = train_env.step(action)  # Step
 
-                if args.use_openai:
-                    # convert back to pytorch tensors
-                    observation = torch.from_numpy(observation).squeeze(1)
-                    reward = torch.from_numpy(reward.astype(np.float32))
-                    done = torch.from_numpy(done.astype(np.bool))
-                    action = torch.from_numpy(action)
-                else:
-                    observation = observation.clone().squeeze(-1)
-                nvtx.range_pop()
+            if args.use_openai:
+                # convert back to pytorch tensors
+                observation = torch.from_numpy(observation).squeeze(1)
+                reward = torch.from_numpy(reward.astype(np.float32))
+                done = torch.from_numpy(done.astype(bool))
+                action = torch.from_numpy(action)
+            else:
+                observation = observation.clone().squeeze(-1)
+            nvtx.range_pop()
 
-                observation = observation.to(device=train_device)
-                reward = reward.to(device=train_device)
-                done = done.to(device=train_device, dtype=torch.bool)
-                action = action.to(device=train_device)
+            observation = observation.to(device=train_device)
+            reward = reward.to(device=train_device)
+            done = done.to(device=train_device, dtype=torch.bool)
+            action = action.to(device=train_device)
 
-                observation = observation.float().div_(255.0)
-                not_done = 1.0 - done.float()
+            observation = observation.float().div_(255.0)
+            not_done = 1.0 - done.float()
 
-                state[:, :-1].copy_(state[:, 1:].clone())
-                state *= not_done.view(-1, 1, 1, 1)
-                state[:, -1].copy_(observation)
+            state[:, :-1].copy_(state[:, 1:].clone())
+            state *= not_done.view(-1, 1, 1, 1)
+            state[:, -1].copy_(observation)
 
-                # update episodic reward counters
-                has_completed |= done
+            # update episodic reward counters
+            has_completed |= done
 
-                episode_rewards += reward.float()
-                final_rewards[done] = episode_rewards[done]
-                episode_rewards *= not_done
+            episode_rewards += reward.float()
+            final_rewards[done] = episode_rewards[done]
+            episode_rewards *= not_done
 
-                episode_lengths += not_done
-                final_lengths[done] = episode_lengths[done]
-                episode_lengths *= not_done
+            episode_lengths += not_done
+            final_lengths[done] = episode_lengths[done]
+            episode_lengths *= not_done
 
             # Train and test
             if T >= args.learn_start:
@@ -310,9 +305,6 @@ def worker(gpu, ngpus_per_node, args):
                 if T >= target_update_offset:
                     dqn.update_target_net()
                     target_update_offset += args.target_update
-
-            torch.cuda.current_stream().wait_stream(env_stream)
-            torch.cuda.current_stream().wait_stream(train_stream)
 
             nvtx.range_push('train:append memory')
             mem.append(observation, action, reward, done)  # Append transition to memory

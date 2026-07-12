@@ -4,14 +4,13 @@ This module provides access to several RL environments that generate data
 on the CPU or GPU.
 """
 
-import atari_py
 import math
 import numpy as np
 import os
 import sys
 import torch
 
-from gym import spaces
+from gymnasium import spaces
 
 from torchcule.atari.rom import Rom
 import torchcule_atari
@@ -112,12 +111,15 @@ class Env(torchcule_atari.AtariEnv):
         self.cart_offsets = torch.zeros(num_envs, device=self.device, dtype=torch.int32)
         self.rand_states = torch.randint(0, np.iinfo(np.int32).max, (num_envs,), device=self.device, dtype=torch.int32)
         self.cached_states = torch.zeros((max_noop_steps, self.state_size()), device=self.device, dtype=torch.uint8)
-        self.cached_ram = torch.randint(0, 255, (max_noop_steps, self.cart.ram_size()), device=self.device, dtype=torch.uint8)
+        # the noop-reset cache must boot from zeroed RAM (random contents can
+        # make some games flag started+terminal during the cache build, which
+        # the CPU backend rejects); per-env RAM stays randomized below
+        self.cached_ram = torch.zeros((max_noop_steps, self.cart.ram_size()), device=self.device, dtype=torch.uint8)
         self.cached_frame_states = torch.zeros((max_noop_steps, self.frame_state_size()), device=self.device, dtype=torch.uint8)
         self.cached_tia = torch.zeros((max_noop_steps, self.tia_update_size()), device=self.device, dtype=torch.int32)
         self.cache_index = torch.zeros((num_envs,), device=self.device, dtype=torch.int32)
 
-        self.set_cuda(self.is_cuda, self.device.index if self.is_cuda else -1)
+        self.set_cuda(self.is_cuda, self._gpu_index())
         self.initialize(self.states.data_ptr(),
                         self.frame_states.data_ptr(),
                         self.ram.data_ptr(),
@@ -132,6 +134,12 @@ class Env(torchcule_atari.AtariEnv):
                         self.cached_tia.data_ptr(),
                         self.cache_index.data_ptr());
 
+    def _gpu_index(self):
+        """CUDA device ordinal for the C++ backend (-1 when running on CPU)."""
+        if not self.is_cuda:
+            return -1
+        return self.device.index if self.device.index is not None else torch.cuda.current_device()
+
     def to(self, device):
         if self.is_cuda:
             torch.cuda.current_stream().synchronize()
@@ -140,7 +148,7 @@ class Env(torchcule_atari.AtariEnv):
 
         self.device = torch.device(device)
         self.is_cuda = self.device.type == 'cuda'
-        self.set_cuda(self.is_cuda, self.device.index if self.is_cuda else -1)
+        self.set_cuda(self.is_cuda, self._gpu_index())
 
         self.observations1 = self.observations1.to(self.device)
         self.observations2 = self.observations2.to(self.device)

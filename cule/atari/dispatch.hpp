@@ -57,7 +57,14 @@ reset(ExecutionPolicy&& policy,
                         wrap.rand_states_ptr,
                         seedBuffer);
 
-    for (size_t i = 0; i < ENV_BASE_FRAMES; i++)
+    // Boot the base state, then keep stepping (bounded) while the game still
+    // reports terminal: several games (e.g. ms_pacman, space_invaders) need
+    // extra frames after the console RESET before their lives/score RAM is
+    // initialized, and caching those pre-boot states leaves every reset
+    // permanently terminal. Games that boot clean take no extra frames.
+    const size_t max_boot_frames = 16 * ENV_BASE_FRAMES;
+    bool game_booting = true;
+    for (size_t i = 0; (i < ENV_BASE_FRAMES) || (game_booting && (i < max_boot_frames)); i++)
     {
         agency::bulk_invoke(policy(1),
                             step_functor<Environment>{},
@@ -67,6 +74,9 @@ reset(ExecutionPolicy&& policy,
                             nullptr,
                             nullptr,
                             nullptr);
+        // read the per-game terminal state recomputed by the emulation step,
+        // before the preprocess pass below clears it for frame rendering
+        game_booting = wrap.cached_states_ptr[0].tiaFlags[FLAG_ALE_TERMINAL];
         agency::bulk_invoke(policy(1),
                             preprocess_functor<Environment>{},
                             true,

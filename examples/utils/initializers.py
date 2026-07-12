@@ -1,6 +1,7 @@
 import csv
-import gym
+import gymnasium as gym
 import json
+import math
 import numpy as np
 import os
 import socket
@@ -117,9 +118,9 @@ def log_initialize(args, device):
     if args.verbose:
         print()
         print('PyTorch  : {}'.format(torch.__version__))
-        print('CUDA     : {}'.format(torch.backends.cudnn.m.cuda))
+        print('CUDA     : {}'.format(torch.version.cuda))
         print('CUDNN    : {}'.format(torch.backends.cudnn.version()))
-        print('GYM      : {}'.format(gym.version.VERSION))
+        print('GYM      : {}'.format(gym.__version__))
         print()
 
     if device.type == 'cuda':
@@ -141,6 +142,6 @@ def model_initialize(args, model, device):
 
     if device.type == 'cuda':
         if args.distributed:
-            model = DDP(model, delay_allreduce=True)
+            model = DDP(model, device_ids=[args.gpu])
 
     return model, optimizer
