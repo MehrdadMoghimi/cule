@@ -7,7 +7,8 @@ with [Gymnasium](https://gymnasium.farama.org) and
 [ale-py](https://github.com/Farama-Foundation/Arcade-Learning-Environment)
 (Atari ROMs are bundled with ale-py — no separate ROM installation needed).
 See [CHANGES.md](CHANGES.md) for the complete list of differences from
-upstream NVlabs/cule, including several upstream bug fixes.
+upstream [NVlabs/cule](https://github.com/NVlabs/cule), including several
+upstream bug fixes.
 
 We have tested the following environment.
 
@@ -21,11 +22,34 @@ at compile time.
 
 # Building CuLE
 
+Clone the repository (with submodules) and pin the `pybind11` submodule to a
+modern release:
+
 ```
-$ git clone --recursive https://github.com/NVlabs/cule
+$ git clone --recursive https://github.com/MehrdadMoghimi/cule
 $ cd cule
 $ git -C third_party/pybind11 fetch --tags && git -C third_party/pybind11 checkout v2.13.6
-$ pip install torch gymnasium ale-py opencv-python-headless tqdm psutil pytz tensorboard cloudpickle matplotlib
+```
+
+Create and activate an environment — either **conda**:
+
+```
+$ conda create -n cule python=3.12
+$ conda activate cule
+```
+
+or a **venv**:
+
+```
+$ python3.12 -m venv .venv
+$ source .venv/bin/activate
+```
+
+Install the Python dependencies and build the extension against your local
+CUDA toolkit:
+
+```
+$ pip install -r requirements.txt
 $ CUDA_HOME=/usr/local/cuda-12.9 pip install --no-build-isolation -e .
 ```
 
@@ -233,7 +257,7 @@ RUN pip install --upgrade pip setuptools wheel && \
     pip install torch gymnasium ale-py cloudpickle opencv-python-headless \
                 psutil pytz tensorboard tqdm
 
-RUN git clone -b master --recursive https://github.com/NVLabs/cule && \
+RUN git clone -b master --recursive https://github.com/MehrdadMoghimi/cule && \
     cd cule && \
     git -C third_party/pybind11 fetch --tags && \
     git -C third_party/pybind11 checkout v2.13.6 && \
