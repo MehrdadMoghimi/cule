@@ -135,46 +135,41 @@ python animate.py --env-name BreakoutNoFrameskip-v4 --use-cuda --num-envs 16
 
 Any of the following can be passed to `--env-name`, either as
 `<CamelCaseName>NoFrameskip-v4` / `ALE/<CamelCaseName>-v5` or as the plain
-rom id shown here. These 34 games pass automated health checks *and* a
+rom id shown here. These 61 games pass automated health checks *and* a
 per-game behavioral verification against the reference ale-py emulator
 (frames render and change, rewards flow under random play at rates consistent
 with ale-py, and agent actions demonstrably influence the game) on both the
 CPU and GPU backends:
 
 ```
-adventure, air_raid, alien, asterix, asteroids, atlantis, beam_rider,
-bowling, boxing, breakout, chopper_command, crazy_climber, demon_attack,
-enduro, fishing_derby, freeway, frostbite, hero, jamesbond, journey_escape,
-kangaroo, krull, name_this_game, phoenix, pong, private_eye, road_runner,
-robotank, seaquest, solaris, star_gunner, time_pilot, up_n_down, zaxxon
+adventure, air_raid, alien, amidar, assault, asterix, asteroids, atlantis,
+bank_heist, battle_zone, beam_rider, berzerk, bowling, boxing, breakout,
+carnival, centipede, chopper_command, crazy_climber, defender, demon_attack,
+enduro, fishing_derby, freeway, frostbite, gopher, gravitar, hero,
+ice_hockey, jamesbond, journey_escape, kaboom, kangaroo, krull,
+kung_fu_master, montezuma_revenge, ms_pacman, name_this_game, phoenix,
+pitfall, pong, pooyan, private_eye, qbert, riverraid, road_runner, robotank,
+seaquest, skiing, solaris, space_invaders, star_gunner, tennis, time_pilot,
+tutankham, up_n_down, venture, video_pinball, wizard_of_wor, yars_revenge,
+zaxxon
 ```
 
 Notes on some supported games:
 
-- `adventure`, `enduro`, `freeway`, `private_eye`, `road_runner`, `solaris`,
-  `zaxxon` give few or no rewards under short *random* play — the reference
-  ale-py emulator behaves the same way; they reward normally once a policy
-  starts acting sensibly.
-- `atlantis`: a fraction of resets (~25% measured) can land in a not-yet-
-  started state that gives no reward until that episode ends; the remaining
-  environments train normally.
+- `adventure`, `enduro`, `freeway`, `montezuma_revenge`, `venture`, `zaxxon`
+  give few or no rewards under short *random* play — the reference ale-py
+  emulator behaves the same way; they reward normally once a policy starts
+  acting sensibly.
 - `air_raid` is a PAL cartridge: CuLE renders it with its PAL palette, so
   colors differ from ale-py's rendering. Gameplay, rewards, and episodes
   are equivalent.
 
-The following games have **broken emulation inherited from upstream CuLE**
-(the emulator does not replicate ALE's game-start handling, so these ROMs
-sit in their attract/demo mode: the screen animates but agent input is
-ignored, scores decode as garbage, or episodes never terminate; see
-[CHANGES.md](CHANGES.md)). They construct and run but are not usable for
-training:
+Two games remain **broken** (see [CHANGES.md](CHANGES.md)); they construct
+and run but are not usable for training:
 
 ```
-amidar, assault, bank_heist, battle_zone, berzerk, carnival, centipede,
-defender, double_dunk, elevator_action, gopher, gravitar, ice_hockey,
-kaboom, kung_fu_master, montezuma_revenge, ms_pacman, pitfall, pooyan,
-qbert, riverraid, skiing, space_invaders, tennis, tutankham, venture,
-video_pinball, wizard_of_wor, yars_revenge
+double_dunk       (agent input is ignored; the ROM's demo plays itself)
+elevator_action   (no rewards on the CPU backend, implausible ones on GPU)
 ```
 
 Other ale-py roms load as well, but without game-specific reward/lives

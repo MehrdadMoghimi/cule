@@ -62,10 +62,21 @@ reset(ExecutionPolicy&& policy,
     // extra frames after the console RESET before their lives/score RAM is
     // initialized, and caching those pre-boot states leaves every reset
     // permanently terminal. Games that boot clean take no extra frames.
-    const size_t max_boot_frames = 16 * ENV_BASE_FRAMES;
+    //
+    // Count completed *frames*, not act() calls: boot sequences with heavy
+    // TIA traffic (e.g. qbert) split one frame across many chunked act()
+    // calls when the update buffer fills, and counting calls used to leave
+    // pre-boot states in the cache (the game then never started).
+    const int32_t max_boot_frames = 16 * ENV_BASE_FRAMES;
+    const size_t max_boot_iters = 64 * size_t(max_boot_frames);
     bool game_booting = true;
-    for (size_t i = 0; (i < ENV_BASE_FRAMES) || (game_booting && (i < max_boot_frames)); i++)
+    for (size_t i = 0; i < max_boot_iters; i++)
     {
+        const int32_t frame = Environment::getFrameNumber(wrap.cached_states_ptr[0]);
+        if (frame >= max_boot_frames)
+            break;
+        if ((frame >= ENV_BASE_FRAMES) && !game_booting)
+            break;
         agency::bulk_invoke(policy(1),
                             step_functor<Environment>{},
                             true,
@@ -115,6 +126,16 @@ reset(ExecutionPolicy&& policy,
                             wrap.cache_index_ptr + i,
                             wrap.cached_frame_states_ptr + i,
                             nullptr);
+    }
+
+    // Sync each cached state's score to what its RAM actually decodes to.
+    // Games whose start score is nonzero (e.g. pitfall boots with 2000
+    // points) otherwise emit a spurious reward on the first step after
+    // every reset (ALE syncs m_score during reset the same way).
+    for (size_t i = 0; i < wrap.noop_reset_steps; i++)
+    {
+        wrap.cached_states_ptr[i].score =
+            Environment::ALE_t::getScore(wrap.cached_states_ptr[i]);
     }
 
     for (size_t i = 0; i < wrap.size(); i++)

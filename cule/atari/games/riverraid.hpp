@@ -20,6 +20,7 @@ CULE_ANNOTATION
     s.m_reward   = 0;
     s.m_score    = 0;
     s.tiaFlags.clear(FLAG_ALE_TERMINAL);
+    s.tiaFlags.clear(FLAG_ALE_GAME_STATE);
     s.m_lives 	 = 0;
     s.m_lives_byte = 0x58;
 }
@@ -94,10 +95,12 @@ template<typename State>
 CULE_ANNOTATION
  void setTerminal(State& s)
 {
-    // update terminal status
+    // ALE flags terminal on the 0x59 -> 0x58 transition of the lives byte
+    // (m_lives_byte in ALE's RiverRaidSettings). The one-frame memory lives
+    // in FLAG_ALE_GAME_STATE.
     int byte_val = cule::atari::ram::read(s.ram, 0xC0);
-    s.tiaFlags.template change<FLAG_ALE_TERMINAL>((byte_val == 0x58) && s.tiaFlags[FLAG_ALE_STARTED]);
-    s.tiaFlags.template change<FLAG_ALE_STARTED>(byte_val == 0x59);
+    s.tiaFlags.template change<FLAG_ALE_TERMINAL>((byte_val == 0x58) && s.tiaFlags[FLAG_ALE_GAME_STATE]);
+    s.tiaFlags.template change<FLAG_ALE_GAME_STATE>(byte_val == 0x59);
 }
 
 CULE_ANNOTATION

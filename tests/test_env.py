@@ -59,17 +59,18 @@ def test_action_space_matches_minimal_actions(device):
     actions = env.sample_random_actions()
     assert actions.max().item() < n
 
-# games whose boot/attract handling is broken in the CuLE emulator (inherited
-# from upstream; see CHANGES.md): they construct fine but sit in reset loops,
-# never terminate, decode garbage scores, or play their demo mode while
-# ignoring agent input (verified against ale-py under matched random play)
+# games still broken in the CuLE emulator (see CHANGES.md). Almost all of the
+# games historically listed here were actually mis-identified ROMs (their
+# ale-py md5s were missing from rom_game_map, so they ran with bowling's
+# decoder and action set) or victims of boot/flag bugs — all fixed and
+# verified against ale-py under matched random play.
 KNOWN_BROKEN_GAMES = [
-    'amidar', 'assault', 'bank_heist', 'battle_zone', 'berzerk', 'carnival',
-    'centipede', 'defender', 'double_dunk', 'elevator_action', 'gopher',
-    'gravitar', 'ice_hockey', 'kaboom', 'kung_fu_master', 'montezuma_revenge',
-    'ms_pacman', 'pitfall', 'pooyan', 'qbert', 'riverraid', 'skiing',
-    'space_invaders', 'tennis', 'tutankham', 'venture', 'video_pinball',
-    'wizard_of_wor', 'yars_revenge',
+    # agent input is ignored on both backends (the demo plays itself and
+    # its scoring decodes as rewards); ale-py responds to input normally
+    'double_dunk',
+    # CPU backend produces no rewards while the GPU backend produces
+    # implausible ones (backend-divergent emulation, unresolved)
+    'elevator_action',
 ]
 
 def run_game_health_check(device, game, steps=100):
@@ -117,13 +118,40 @@ def test_games_step_across_rom_formats(device, game):
     run_game_health_check(device, game)
 
 @pytest.mark.parametrize('game', ['space_invaders', 'ms_pacman', 'tennis', 'qbert'])
+def test_formerly_broken_games_stay_fixed(game):
+    # these ROMs used to be mis-identified (md5 missing from rom_game_map ->
+    # ran as bowling) or boot-deadlocked (qbert); guard the fixes
+    run_game_health_check('cpu', game, steps=100)
+    # rewards must flow under random play (they do in ale-py for all four;
+    # episode termination is not asserted here -- a tennis match outlasts
+    # any reasonable test budget)
+    env = make_env('cpu', game=game, num_envs=8)
+    env.train()
+    env.reset(initial_steps=40)
+    total = torch.zeros(8)
+    for _ in range(300):
+        _, reward, _, _ = env.step(env.sample_random_actions())
+        total += reward
+    assert total.abs().sum().item() > 0, 'no rewards under random play'
+
+@pytest.mark.parametrize('game', KNOWN_BROKEN_GAMES)
 @pytest.mark.xfail(strict=True,
-                   reason='inherited emulator defect (see KNOWN_BROKEN_GAMES / CHANGES.md); '
+                   reason='known emulator defect (see KNOWN_BROKEN_GAMES / CHANGES.md); '
                           'if this starts passing, move the game to the supported list')
 def test_known_broken_games(game):
-    done_events = run_game_health_check('cpu', game, steps=250)
-    # qbert-style breakage: episodes never terminate under random play
-    assert done_events > 0, 'no episode ever ended'
+    # a healthy game rewards AND terminates under sustained random play
+    # (double_dunk: demo rewards but no episodes; elevator_action: no CPU
+    # rewards at all)
+    env = make_env('cpu', game=game, num_envs=8)
+    env.train()
+    env.reset(initial_steps=40)
+    total = torch.zeros(8)
+    done_events = 0
+    for _ in range(400):
+        _, reward, done, _ = env.step(env.sample_random_actions())
+        total += reward
+        done_events += int(done.sum())
+    assert total.abs().sum().item() > 0 and done_events > 0
 
 @pytest.mark.parametrize('device', device_params())
 def test_rewards_flow_under_random_play(device):
@@ -198,12 +226,9 @@ def test_agent_input_affects_game():
             obs, _, _, _ = env.step(actions)
         return obs.cpu()
 
-    assert not torch.equal(rollout('BreakoutNoFrameskip-v4', 0),
-                           rollout('BreakoutNoFrameskip-v4', 3)), \
-        'breakout must respond to agent input'
-    # kaboom is a known attract-mode game: input is ignored; if this starts
-    # failing, game-start handling improved -- re-audit KNOWN_BROKEN_GAMES
-    assert torch.equal(rollout('kaboom', 0), rollout('kaboom', 3))
+    for game in ('BreakoutNoFrameskip-v4', 'kaboom', 'qbert'):
+        assert not torch.equal(rollout(game, 0), rollout(game, 3)), \
+            '{} must respond to agent input'.format(game)
 
 @requires_cuda
 def test_training_mode_fire_reset_flag():

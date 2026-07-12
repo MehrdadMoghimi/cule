@@ -214,7 +214,16 @@ struct get_data_functor
         const bool lost_life = new_lives < old_lives;
         s.tiaFlags.template change<FLAG_ALE_LOST_LIFE>(lost_life);
 
-        rewards_buffer[self.index()] += ALE_t::getRewards(s);
+        // While the machine is rebooting after a game over (environment::act
+        // power-cycles the console and replays the boot phases), the score
+        // RAM re-initializes to the game's starting score; accumulating the
+        // delta would credit e.g. pitfall's starting 2000 points to the agent
+        // on the first step of every episode. s.score still tracks the
+        // decoded value so the first started step sees a zero delta.
+        if (s.tiaFlags[FLAG_ALE_STARTED])
+        {
+            rewards_buffer[self.index()] += ALE_t::getRewards(s);
+        }
         done_buffer[self.index()] |= s.tiaFlags[FLAG_ALE_TERMINAL] || (episodic_life && lost_life);
 
         s.score = ALE_t::getScore(s);

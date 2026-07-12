@@ -138,6 +138,17 @@ void emulate(State_t& s)
     Controller_t::applyAction(s);
     M6502_t::run(s);
 
+    // No-VSYNC fallback: a game that stops strobing VSYNC (typically a wait
+    // loop polling the console RESET switch, e.g. qbert waiting for release)
+    // would leave the frame partial forever. The TIA applies the same
+    // scanline-overflow fallback only on register pokes, which such wait
+    // loops never perform, so mirror it here after the CPU slice.
+    if(s.tiaFlags[FLAG_TIA_PARTIAL] &&
+       (TIA_t::currentScanline(s) > (TIA_t::is_ntsc(s) ? 290 : 342)))
+    {
+        s.tiaFlags.clear(FLAG_TIA_PARTIAL);
+    }
+
     if(!s.tiaFlags[FLAG_TIA_PARTIAL])
     {
         TIA_t::finishFrame(s);

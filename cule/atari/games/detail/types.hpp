@@ -86,6 +86,41 @@ static std::map<std::string, GAME_TYPE> rom_game_map =
     { "cfc226d04d7490b69e155abd7741e98c", GAME_DOUBLE_DUNK},
     { "7d3cdde63b16fa637c4484e716839c94", GAME_ROAD_RUNNER},
     { "e72eb8d4410152bdcb69e7fba327b420", GAME_SOLARIS},
+
+    // md5s of the ROM dumps bundled with ale-py (Farama). Without these
+    // entries the ROMs fall back to GAME_TYPE 0 == GAME_BOWLING and run
+    // with bowling's reward decoding, terminal logic, and action set.
+    { "5428cdfada281c569c74c7308c7f2c26", GAME_KABOOM},          // kaboom.bin
+    { "b76fbadc8ffb1f83e2ca08b6fb4d6c9f", GAME_SKIING},          // skiing.bin
+    { "42cdd6a9e42a3639e190722b8ea3fc51", GAME_TENNIS},          // tennis.bin
+    { "acb7750b4d0c4bd34969802a7deb2990", GAME_AMIDAR},          // amidar.bin
+    { "de78b3a064d374390ac0710f95edde92", GAME_ASSAULT},         // assault.bin
+    { "9ad36e699ef6f45d9eb6c4cf90475c9f", GAME_ATLANTIS},        // atlantis.bin
+    { "00ce0bdd43aed84a983bef38fe7f5ee3", GAME_BANK_HEIST},      // bank_heist.bin
+    { "136f75c4dd02c29283752b7e5799f978", GAME_BERZERK},         // berzerk.bin
+    { "028024fb8e5e5f18ea586652f9799c96", GAME_CARNIVAL},        // carnival.bin
+    { "0f643c34e40e3f1daafd9c524d3ffe64", GAME_DEFENDER},        // defender.bin
+    { "f0e0addc07971561ab80d9abe1b8d333", GAME_DEMON_ATTACK},    // demon_attack.bin
+    { "c16c79aad6272baffb8aae9a7fff0864", GAME_GOPHER},          // gopher.bin
+    { "a4c08c4994eb9d24fb78be1793e82e26", GAME_ICE_HOCKEY},      // ice_hockey.bin
+    { "36306070f0c90a72461551a7a4f3a209", GAME_NAME_THIS_GAME},  // name_this_game.bin
+    { "3e90cf23106f2e08b2781e41299de556", GAME_PITFALL},         // pitfall.bin
+    { "4799a40b6e889370b7ee55c17ba65141", GAME_POOYAN},          // pooyan.bin
+    { "393948436d1f4cc3192410bb918f9724", GAME_RIVERRAID},       // riverraid.bin
+    { "72ffbef6504b75e69ee1045af9075f66", GAME_SPACE_INVADERS},  // space_invaders.bin
+    { "3e899eba0ca8cd2972da1ae5479b4f0d", GAME_VENTURE},         // venture.bin
+    { "107cc025334211e6d29da0b6be46aec7", GAME_PINBALL},         // video_pinball.bin
+    { "7e8aa18bc9502eb57daaf5e7c1e94da7", GAME_WIZARD},          // wizard_of_wor.bin
+    { "c5930d0e8cdae3e037349bfa08e871be", GAME_YARS_REVENGE},    // yars_revenge.bin
+    { "41f252a66c6301f1e8ab3612c19bc5d4", GAME_BATTLE_ZONE},     // battle_zone.bin
+    { "91c2098e88a6b13f977af8c003e0bca5", GAME_CENTIPEDE},       // centipede.bin
+    { "8ac18076d01a6b63acf6e2cab4968940", GAME_GRAVITAR},        // gravitar.bin
+    { "4baada22435320d185c95b7dd2bcdb24", GAME_KRULL},           // krull.bin
+    { "5b92a93b23523ff16e2789b820e2a4c5", GAME_KUNG_FU_MASTER},  // kung_fu_master.bin
+    { "87e79cd41ce136fd4f72cc6e2c161bee", GAME_MS_PACMAN},       // ms_pacman.bin
+    { "085322bae40d904f53bdcc56df0593fc", GAME_TUTANKHAM},       // tutankham.bin
+    { "368d88a6c071caba60b4f778615aae94", GAME_DOUBLE_DUNK},     // double_dunk.bin
+    { "ce5cc62608be2cd3ed8abd844efb8919", GAME_ROAD_RUNNER},     // road_runner.bin
 };
 
 const std::array<std::string,_ROM_ATTR_MAX> rom_attr_names =

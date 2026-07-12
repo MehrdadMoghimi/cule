@@ -205,6 +205,10 @@ enum TIA_FLAGS
     FLAG_ALE_STARTED      = 1 << 28,
     FLAG_ALE_TERMINAL     = 1 << 29,
     FLAG_ALE_LOST_LIFE    = 1 << 30,
+    // game-private one-frame memory for setTerminal (riverraid, qbert).
+    // FLAG_ALE_STARTED cannot serve this purpose: environment::act()
+    // overwrites it every frame with the boot-phase condition.
+    FLAG_ALE_GAME_STATE   = 0x80000000,
 };
 
 enum : uint32_t

@@ -22,6 +22,7 @@ void reset(State& s)
     s.tiaFlags.clear(FLAG_ALE_TERMINAL);
     s.m_lives 	 = 5;
     s.tiaFlags.set(FLAG_ALE_STARTED);
+    s.tiaFlags.set(FLAG_ALE_GAME_STATE);
 }
 
 template<typename State>
@@ -92,7 +93,7 @@ int32_t lives(State& s)
 {
     // update terminal status
     int lives_byte = cule::atari::ram::read(s.ram, 0x87);
-    return s.tiaFlags[FLAG_ALE_STARTED] ? (lives_byte & 0xF) : 5;
+    return s.tiaFlags[FLAG_ALE_GAME_STATE] ? (lives_byte & 0xF) : 5;
 }
 
 template<typename State>
@@ -104,8 +105,9 @@ void setTerminal(State& s)
     s.tiaFlags.template change<FLAG_ALE_TERMINAL>(lives_byte == 0);
 
     // We record when the game starts, which is needed to deal with the lives == 6 starting
-    // situation
-    s.tiaFlags.template change<FLAG_ALE_STARTED>(lives_byte == 0x05);
+    // situation (game-private memory bit; FLAG_ALE_STARTED belongs to
+    // environment::act's boot phases)
+    s.tiaFlags.template change<FLAG_ALE_GAME_STATE>(lives_byte == 0x05);
 }
 
 template<typename State>

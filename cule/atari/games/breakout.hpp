@@ -79,12 +79,14 @@ void setTerminal(State& s)
 {
     int m_lives = lives(s);
 
-    if (!s.tiaFlags[FLAG_ALE_STARTED] && (m_lives == 5))
+    // "seen 5 lives" latch in the game-private memory bit
+    // (FLAG_ALE_STARTED belongs to environment::act's boot phases)
+    if (!s.tiaFlags[FLAG_ALE_GAME_STATE] && (m_lives == 5))
     {
-        s.tiaFlags.set(FLAG_ALE_STARTED);
+        s.tiaFlags.set(FLAG_ALE_GAME_STATE);
     }
 
-    s.tiaFlags.template change<FLAG_ALE_TERMINAL>(s.tiaFlags[FLAG_ALE_STARTED] && (m_lives == 0));
+    s.tiaFlags.template change<FLAG_ALE_TERMINAL>(s.tiaFlags[FLAG_ALE_GAME_STATE] && (m_lives == 0));
 }
 
 template<typename State>

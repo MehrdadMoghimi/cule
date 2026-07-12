@@ -20,6 +20,7 @@ CULE_ANNOTATION
     s.m_reward     = 0;
     s.m_score      = 0;
     s.tiaFlags.clear(FLAG_ALE_TERMINAL);
+    s.tiaFlags.clear(FLAG_ALE_GAME_STATE);
     s.m_lives 	   = 4;
     s.m_last_lives = 2;
 }
@@ -90,11 +91,14 @@ CULE_ANNOTATION
     // update terminal status
     int lives_value = cule::atari::ram::read(s.ram, 0x88);
     // Lives start at 2 (4 lives, 3 displayed) and go down to 0xFE (death)
-    // Alternatively we can die and reset within one frame; we catch this case
-    s.tiaFlags.template change<FLAG_ALE_TERMINAL>((lives_value == 0xFE) || ((lives_value == 0x02) && s.tiaFlags[FLAG_ALE_STARTED]));
+    // Alternatively we can die and reset within one frame; we catch this case.
+    // ALE compares against the previous frame's lives byte (m_last_lives);
+    // that one-frame memory lives in FLAG_ALE_GAME_STATE here
+    // (FLAG_ALE_STARTED is overwritten by environment::act every frame).
+    s.tiaFlags.template change<FLAG_ALE_TERMINAL>((lives_value == 0xFE) || ((lives_value == 0x02) && s.tiaFlags[FLAG_ALE_GAME_STATE]));
 
     int livesAsChar = static_cast<char>(lives_value);
-    s.tiaFlags.template change<FLAG_ALE_STARTED>(livesAsChar == -1);
+    s.tiaFlags.template change<FLAG_ALE_GAME_STATE>(livesAsChar == -1);
 }
 
 template<typename State>

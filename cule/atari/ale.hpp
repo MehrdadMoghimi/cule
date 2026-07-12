@@ -190,6 +190,7 @@ void reset(State_t& s)
 {
     s.tiaFlags.clear(FLAG_ALE_TERMINAL);
     s.tiaFlags.clear(FLAG_ALE_STARTED);
+    s.tiaFlags.clear(FLAG_ALE_GAME_STATE);
 
     s.score = 0;
 }

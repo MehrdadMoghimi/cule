@@ -68,32 +68,52 @@ without modifying any CUDA kernel.
      reports terminal before filling the noop cache — games that boot clean
      take zero extra frames.
 
-   **Construction no longer crashes, but most of these games remain broken
-   at the emulation level** (inherited from upstream): CuLE never ported
-   ALE's per-ROM game-start machinery (`RomSettings::reset()` plus ALE-side
-   lives tracking), so these ROMs sit in attract/demo mode — reset loops,
-   episodes that never terminate (qbert, elevator_action), or garbage score
-   decoding (defender, space_invaders). Upstream's own benchmark script
-   silently excluded qbert, defender and elevator_action; the paper's
-   experiments used games from the working set.
+   Construction no longer crashes with those fixes, and a per-game
+   behavioral audit against the reference ale-py emulator (matched random
+   play comparing reward flow, reward values, episode termination, frame
+   liveness and color palettes, plus a deterministic input-effect test:
+   identical-seed GPU rollouts differing only in the action must diverge)
+   uncovered the real reasons most of these games misbehaved — all fixed
+   in this fork (see next item). Upstream's own benchmark script silently
+   excluded qbert, defender and elevator_action; the paper's experiments
+   used games from the working set.
+8. **61 of the 63 decoded games are now verified working; upstream had
+   ~half of them silently running as the wrong game.** Four distinct bugs:
+   - **ROM identity (the big one): 76 of the 108 ROM dumps bundled with
+     ale-py have md5s that were missing from `rom_game_map`**
+     (`cule/atari/games/detail/types.hpp`), and an unmapped md5 silently
+     resolves to `GAME_TYPE` 0 — bowling. Those ROMs emulated fine but ran
+     with *bowling's* reward decoder, terminal detection, controller
+     attributes, and minimal action set (e.g. amidar's agent had no
+     LEFT/RIGHT and could never walk; ice_hockey "rewards" decoded
+     bowling's score address, which holds ice hockey's game clock). Fixed
+     by adding the 31 ale-py md5s for the games CuLE decodes.
+   - **`FLAG_ALE_STARTED` double-use**: `environment::act()` overwrites the
+     flag every frame with its boot-phase condition, but riverraid's and
+     qbert's `setTerminal` used it as one-frame memory (ALE's
+     `m_lives_byte`/`m_last_lives`), so riverraid reported done on every
+     step. Game-private memory now lives in a new `FLAG_ALE_GAME_STATE`
+     bit (riverraid, qbert, stargunner, breakout migrated).
+   - **Boot deadlock**: while the console RESET switch is held during the
+     boot sequence, some ROMs (qbert, montezuma_revenge) sit in a wait
+     loop without strobing VSYNC, so the frame never completed, the boot
+     never advanced past frame 60, and the cached reset states were
+     pre-boot garbage (qbert's RAM stayed all-zero forever). Fixed with a
+     scanline-overflow fallback in `environment::emulate` (mirroring the
+     one the TIA already applied on register pokes) plus counting completed
+     frames — not `act()` calls — in the reset-cache boot loop.
+   - **Reset-boundary reward artifacts**: cached reset states carried
+     `score = 0` while their RAM already decodes the game's starting score
+     (pitfall boots with 2000 points), crediting the difference to the
+     agent on the first step of every episode. The cache builder now syncs
+     each slot's score after boot, and `get_data` only accumulates rewards
+     once the boot phases are finished.
 
-   A per-game behavioral audit against the reference ale-py emulator
-   (matched random play comparing reward flow, reward values, episode
-   termination, frame liveness and color palettes, plus a deterministic
-   input-effect test: identical-seed GPU rollouts differing only in the
-   action must diverge) found **10 more games from this class** that pass
-   the basic health checks but are not actually playable: amidar, carnival,
-   gopher, ice_hockey, kaboom, montezuma_revenge, pooyan, riverraid,
-   video_pinball and wizard_of_wor. Typical symptoms: the screen animates
-   but agent input is ignored (kaboom, carnival, gopher, montezuma_revenge,
-   wizard_of_wor — the ROM's demo plays itself), rewards decode from the
-   wrong state (ice_hockey effectively counts the game clock; riverraid's
-   score digits scroll through non-digit codes and its episodes never
-   terminate), or reward rates are orders of magnitude below the reference
-   (video_pinball, amidar, pooyan). The final supported list (34 games) and
-   broken list (29) are in the README; `tests/test_env.py` carries a
-   strict-xfail guard plus an input-effect test so a future game-start fix
-   is noticed.
+   Remaining broken (README lists them): double_dunk (agent input ignored
+   on both backends — the demo plays itself; ale-py responds normally) and
+   elevator_action (no rewards on the CPU backend, implausible ones on
+   GPU). `tests/test_env.py` carries a strict-xfail guard, regression tests
+   for the formerly mis-identified games, and an input-effect test.
 2. **Intermittent `CUDA error: an illegal memory access` during DQN/PPO
    training.** `dqn/train.py` stepped the environment inside
    `torch.cuda.stream(env_stream)` (and trained under other side streams)
@@ -143,7 +163,8 @@ without modifying any CUDA kernel.
   cartridge mappers), the Gymnasium wrapper stack, and end-to-end training
   micro-runs for a2c, vtrace, ppo and dqn (`pytest -m slow`).
 - README sections: building on modern stacks, per-algorithm example commands,
-  the list of 62 games with reward decoding, testing instructions.
+  the list of 63 games with reward decoding (61 verified working), testing
+  instructions.
 - Updated `envs/Dockerfile` (CUDA 12.9 / Ubuntu 24.04) and
   `envs/environment.yml`.
 
@@ -155,5 +176,8 @@ without modifying any CUDA kernel.
   scheduling).
 - `pitfall2` is the only bundled ale-py ROM whose cartridge mapper is
   unsupported.
-- Games outside the 62 with reward decoding load and emulate but always
+- Games outside the 63 with reward decoding load and emulate but always
   return reward 0.
+- Resetting with explicit seeds (`env.reset(seeds=...)`) can land some games
+  in odd emulator states (observed with montezuma_revenge: the agent spawns
+  displaced and stops responding); the default reset path is unaffected.
