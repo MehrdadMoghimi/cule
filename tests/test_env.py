@@ -61,12 +61,15 @@ def test_action_space_matches_minimal_actions(device):
 
 # games whose boot/attract handling is broken in the CuLE emulator (inherited
 # from upstream; see CHANGES.md): they construct fine but sit in reset loops,
-# never terminate, or decode garbage scores
+# never terminate, decode garbage scores, or play their demo mode while
+# ignoring agent input (verified against ale-py under matched random play)
 KNOWN_BROKEN_GAMES = [
-    'assault', 'bank_heist', 'battle_zone', 'berzerk', 'centipede', 'defender',
-    'double_dunk', 'elevator_action', 'gravitar', 'kung_fu_master', 'ms_pacman',
-    'pitfall', 'qbert', 'skiing', 'space_invaders', 'tennis', 'tutankham',
-    'venture', 'yars_revenge',
+    'amidar', 'assault', 'bank_heist', 'battle_zone', 'berzerk', 'carnival',
+    'centipede', 'defender', 'double_dunk', 'elevator_action', 'gopher',
+    'gravitar', 'ice_hockey', 'kaboom', 'kung_fu_master', 'montezuma_revenge',
+    'ms_pacman', 'pitfall', 'pooyan', 'qbert', 'riverraid', 'skiing',
+    'space_invaders', 'tennis', 'tutankham', 'venture', 'video_pinball',
+    'wizard_of_wor', 'yars_revenge',
 ]
 
 def run_game_health_check(device, game, steps=100):
@@ -105,6 +108,8 @@ def run_game_health_check(device, game, steps=100):
     'ChopperCommandNoFrameskip-v4',     # 4K
     'AsterixNoFrameskip-v4',            # F8
     'RoadRunnerNoFrameskip-v4',         # F6
+    # E0-format coverage; montezuma steps mechanically but is in
+    # KNOWN_BROKEN_GAMES for training (demo mode ignores agent input)
     'MontezumaRevengeNoFrameskip-v4',   # E0
     'RobotankNoFrameskip-v4',           # FE
 ])
@@ -173,6 +178,32 @@ def test_gpu_rollout_deterministic_with_seeds():
     obs2, rew2 = rollout()
     assert torch.equal(obs1, obs2)
     assert torch.equal(rew1, rew2)
+
+@requires_cuda
+def test_agent_input_affects_game():
+    # demo-mode detector: with identical seeds, rollouts that differ only in
+    # the (constant) action must diverge for a playable game. Games stuck in
+    # their ROM's attract mode ignore input entirely (see KNOWN_BROKEN_GAMES).
+    def rollout(game, action_idx, steps=150):
+        torch.manual_seed(7)
+        torch.cuda.manual_seed_all(7)
+        env = make_env('cuda', game=game, num_envs=2, color_mode='rgb',
+                       rescale=False)
+        env.train()
+        env.reset(seeds=torch.tensor([11, 12], dtype=torch.int32,
+                                     device=env.device))
+        actions = torch.full((2,), min(action_idx, env.action_space.n - 1),
+                             dtype=torch.uint8, device=env.device)
+        for _ in range(steps):
+            obs, _, _, _ = env.step(actions)
+        return obs.cpu()
+
+    assert not torch.equal(rollout('BreakoutNoFrameskip-v4', 0),
+                           rollout('BreakoutNoFrameskip-v4', 3)), \
+        'breakout must respond to agent input'
+    # kaboom is a known attract-mode game: input is ignored; if this starts
+    # failing, game-start handling improved -- re-audit KNOWN_BROKEN_GAMES
+    assert torch.equal(rollout('kaboom', 0), rollout('kaboom', 3))
 
 @requires_cuda
 def test_training_mode_fire_reset_flag():

@@ -119,7 +119,8 @@ if __name__ == '__main__':
 
         return img2.get_children() + imgs
 
-    ani = animation.FuncAnimation(fig, updatefig, interval=20, blit=True)
+    ani = animation.FuncAnimation(fig, updatefig, interval=20, blit=True,
+                                  cache_frame_data=False)
 
     plt.show()
 

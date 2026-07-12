@@ -73,13 +73,27 @@ without modifying any CUDA kernel.
    ALE's per-ROM game-start machinery (`RomSettings::reset()` plus ALE-side
    lives tracking), so these ROMs sit in attract/demo mode — reset loops,
    episodes that never terminate (qbert, elevator_action), or garbage score
-   decoding (defender, space_invaders). Automated health checks (episode
-   termination, episode length, reward sanity, on both backends) pass for
-   44 games and fail for 19; both lists are in the README, and
-   `tests/test_env.py` carries a strict-xfail guard so a future fix is
-   noticed. Upstream's own benchmark script silently excluded qbert,
-   defender and elevator_action; the paper's experiments used games from
-   the working set.
+   decoding (defender, space_invaders). Upstream's own benchmark script
+   silently excluded qbert, defender and elevator_action; the paper's
+   experiments used games from the working set.
+
+   A per-game behavioral audit against the reference ale-py emulator
+   (matched random play comparing reward flow, reward values, episode
+   termination, frame liveness and color palettes, plus a deterministic
+   input-effect test: identical-seed GPU rollouts differing only in the
+   action must diverge) found **10 more games from this class** that pass
+   the basic health checks but are not actually playable: amidar, carnival,
+   gopher, ice_hockey, kaboom, montezuma_revenge, pooyan, riverraid,
+   video_pinball and wizard_of_wor. Typical symptoms: the screen animates
+   but agent input is ignored (kaboom, carnival, gopher, montezuma_revenge,
+   wizard_of_wor — the ROM's demo plays itself), rewards decode from the
+   wrong state (ice_hockey effectively counts the game clock; riverraid's
+   score digits scroll through non-digit codes and its episodes never
+   terminate), or reward rates are orders of magnitude below the reference
+   (video_pinball, amidar, pooyan). The final supported list (34 games) and
+   broken list (29) are in the README; `tests/test_env.py` carries a
+   strict-xfail guard plus an input-effect test so a future game-start fix
+   is noticed.
 2. **Intermittent `CUDA error: an illegal memory access` during DQN/PPO
    training.** `dqn/train.py` stepped the environment inside
    `torch.cuda.stream(env_stream)` (and trained under other side streams)

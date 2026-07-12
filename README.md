@@ -40,7 +40,7 @@ at compile time.
 $ git clone --recursive https://github.com/NVlabs/cule
 $ cd cule
 $ git -C third_party/pybind11 fetch --tags && git -C third_party/pybind11 checkout v2.13.6
-$ pip install torch gymnasium ale-py opencv-python-headless tqdm psutil pytz tensorboard cloudpickle
+$ pip install torch gymnasium ale-py opencv-python-headless tqdm psutil pytz tensorboard cloudpickle matplotlib
 $ CUDA_HOME=/usr/local/cuda-12.9 pip install --no-build-isolation -e .
 ```
 
@@ -116,7 +116,7 @@ python a2c_main.py --env-name BreakoutNoFrameskip-v4 --use-cuda-env --num-ales 2
 **PPO** (from `examples/ppo`):
 
 ```
-python ppo_main.py --env-name SpaceInvadersNoFrameskip-v4 --use-cuda-env --num-ales 256 --num-steps 20 --t-max 8000000 --evaluation-interval 2000000
+python ppo_main.py --env-name BreakoutNoFrameskip-v4 --use-cuda-env --num-ales 256 --num-steps 20 --t-max 8000000 --evaluation-interval 2000000
 ```
 
 **DQN** (from `examples/dqn`):
@@ -135,29 +135,46 @@ python animate.py --env-name BreakoutNoFrameskip-v4 --use-cuda --num-envs 16
 
 Any of the following can be passed to `--env-name`, either as
 `<CamelCaseName>NoFrameskip-v4` / `ALE/<CamelCaseName>-v5` or as the plain
-rom id shown here. These 44 games pass automated health checks (episodes
-terminate, rewards flow, no reset loops) on both the CPU and GPU backends:
+rom id shown here. These 34 games pass automated health checks *and* a
+per-game behavioral verification against the reference ale-py emulator
+(frames render and change, rewards flow under random play at rates consistent
+with ale-py, and agent actions demonstrably influence the game) on both the
+CPU and GPU backends:
 
 ```
-adventure, air_raid, alien, amidar, asterix, asteroids, atlantis, beam_rider,
-bowling, boxing, breakout, carnival, chopper_command, crazy_climber,
-demon_attack, enduro, fishing_derby, freeway, frostbite, gopher, hero,
-ice_hockey, jamesbond, journey_escape, kaboom, kangaroo, krull,
-montezuma_revenge, name_this_game, phoenix, pong, pooyan, private_eye,
-riverraid, road_runner, robotank, seaquest, solaris, star_gunner, time_pilot,
-up_n_down, video_pinball, wizard_of_wor, zaxxon
+adventure, air_raid, alien, asterix, asteroids, atlantis, beam_rider,
+bowling, boxing, breakout, chopper_command, crazy_climber, demon_attack,
+enduro, fishing_derby, freeway, frostbite, hero, jamesbond, journey_escape,
+kangaroo, krull, name_this_game, phoenix, pong, private_eye, road_runner,
+robotank, seaquest, solaris, star_gunner, time_pilot, up_n_down, zaxxon
 ```
+
+Notes on some supported games:
+
+- `adventure`, `enduro`, `freeway`, `private_eye`, `road_runner`, `solaris`,
+  `zaxxon` give few or no rewards under short *random* play — the reference
+  ale-py emulator behaves the same way; they reward normally once a policy
+  starts acting sensibly.
+- `atlantis`: a fraction of resets (~25% measured) can land in a not-yet-
+  started state that gives no reward until that episode ends; the remaining
+  environments train normally.
+- `air_raid` is a PAL cartridge: CuLE renders it with its PAL palette, so
+  colors differ from ale-py's rendering. Gameplay, rewards, and episodes
+  are equivalent.
 
 The following games have **broken emulation inherited from upstream CuLE**
-(reset loops, episodes that never terminate, or garbage score decoding —
-the emulator's game-start handling does not replicate ALE's per-ROM logic;
-see [CHANGES.md](CHANGES.md)). They construct and run but are not usable for
+(the emulator does not replicate ALE's game-start handling, so these ROMs
+sit in their attract/demo mode: the screen animates but agent input is
+ignored, scores decode as garbage, or episodes never terminate; see
+[CHANGES.md](CHANGES.md)). They construct and run but are not usable for
 training:
 
 ```
-assault, bank_heist, battle_zone, berzerk, centipede, defender, double_dunk,
-elevator_action, gravitar, kung_fu_master, ms_pacman, pitfall, qbert, skiing,
-space_invaders, tennis, tutankham, venture, yars_revenge
+amidar, assault, bank_heist, battle_zone, berzerk, carnival, centipede,
+defender, double_dunk, elevator_action, gopher, gravitar, ice_hockey,
+kaboom, kung_fu_master, montezuma_revenge, ms_pacman, pitfall, pooyan,
+qbert, riverraid, skiing, space_invaders, tennis, tutankham, venture,
+video_pinball, wizard_of_wor, yars_revenge
 ```
 
 Other ale-py roms load as well, but without game-specific reward/lives

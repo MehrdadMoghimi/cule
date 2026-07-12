@@ -26,6 +26,7 @@ RUN pip install --upgrade pip setuptools wheel && \
                 gymnasium \
                 ale-py \
                 cloudpickle \
+                matplotlib \
                 opencv-python-headless \
                 psutil \
                 pytz \
