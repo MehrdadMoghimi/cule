@@ -1,18 +1,3 @@
-![ALT](/media/images/System.png "Deep RL System Overview")
-
-# CuLE 0.1.0
-
-_CuLE 0.1.0 - July 2019_
-
-CuLE is a CUDA port of the Atari Learning Environment (ALE) and is
-designed to accelerate the development and evaluation of deep
-reinforcement algorithms using Atari games. Our CUDA Learning
-Environment (CuLE) overcomes many limitations of existing CPU- based
-Atari emulators and scales naturally to multi-GPU systems.  It leverages
-the parallelization capability of GPUs to run thousands of Atari games
-simultaneously; by rendering frames directly on the GPU, CuLE avoids the
-bottleneck arising from the limited CPU-GPU communication bandwidth.
-
 # Compatibility
 
 This fork is updated for modern software stacks: it compiles with the
@@ -55,31 +40,6 @@ Notes:
 - The unmaintained `agency` submodule needs small fixes for GCC >= 9;
   setup.py applies [third_party/patches/agency-modern-toolchain.patch](third_party/patches/agency-modern-toolchain.patch)
   automatically when it is missing.
-
-# Project Structure
-
-```
-cule/
-  cule/
-  env/
-  examples/
-  media/
-  third_party/
-  torchcule/
-```
-
-Several example programs are also distributed with the CuLE library. They are
-contained in the following directories.
-
-```
-examples/
-  a2c/
-  dqn/
-  ppo/
-  vtrace/
-  utils/
-  visualize/
-```
 
 # Running the examples
 
@@ -207,6 +167,48 @@ micro-training runs for every algorithm:
 pip install pytest
 pytest              # fast checks (~1 minute; GPU tests auto-skip without CUDA)
 pytest -m slow      # end-to-end training micro-runs for a2c/vtrace/ppo/dqn
+```
+
+---
+
+![ALT](/media/images/System.png "Deep RL System Overview")
+
+# CuLE 0.1.0
+
+_CuLE 0.1.0 - July 2019_
+
+CuLE is a CUDA port of the Atari Learning Environment (ALE) and is
+designed to accelerate the development and evaluation of deep
+reinforcement algorithms using Atari games. Our CUDA Learning
+Environment (CuLE) overcomes many limitations of existing CPU- based
+Atari emulators and scales naturally to multi-GPU systems.  It leverages
+the parallelization capability of GPUs to run thousands of Atari games
+simultaneously; by rendering frames directly on the GPU, CuLE avoids the
+bottleneck arising from the limited CPU-GPU communication bandwidth.
+
+# Project Structure
+
+```
+cule/
+  cule/
+  env/
+  examples/
+  media/
+  third_party/
+  torchcule/
+```
+
+Several example programs are also distributed with the CuLE library. They are
+contained in the following directories.
+
+```
+examples/
+  a2c/
+  dqn/
+  ppo/
+  vtrace/
+  utils/
+  visualize/
 ```
 
 # Docker 
