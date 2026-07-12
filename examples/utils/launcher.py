@@ -41,16 +41,28 @@ def add_global_parser_options(parser):
     parser.add_argument('--normalize', action='store_true', default=False, help='Normalize and center input to network')
     parser.add_argument('--num-ales', type=int, default=16, help='number of environments (default: 16)')
     parser.add_argument('--num-gpus-per-node', type=int, default=-1, help='Number of GPUs per node (default: -1 [use all available])')
+    parser.add_argument('--no-progress', action='store_true', default=False,
+                        help='Disable tqdm progress output')
     parser.add_argument('--output-filename', type=str, default=None, help='Output filename')
     parser.add_argument('--plot', action='store_true', default=False, help='Enable plotting with bokeh')
     parser.add_argument('--profile', action='store_true', default=False, help='Enable Nsight Systems profiling')
     parser.add_argument('--save-interval', type=int, default=0, help='Interval to save model to file (default: 0)')
+    parser.add_argument('--solve-reward', type=float, default=None,
+                        help='Stop training when mean evaluation reward reaches this value')
+    parser.add_argument('--skip-initial-evaluation', action='store_true', default=False,
+                        help='Start evaluation at --evaluation-interval instead of frame zero')
     parser.add_argument('--seed', type=int, default=int(time.time()), help='random seed (default: time())')
     parser.add_argument('--t-max', type=int, default=int(50e6), help='Number of training steps (default: 50,000,000)')
     parser.add_argument('--torch-compile', action='store_true', default=False,
                         help='Wrap the model in torch.compile (experimental; measured '
                              'slower than eager for these small models — see README '
                              'performance notes)')
+    parser.add_argument('--throughput-benchmark', action='store_true', default=False,
+                        help='Skip evaluation and emit a machine-readable full-training throughput result')
+    parser.add_argument('--benchmark-warmup-iterations', type=int, default=10,
+                        help='Iterations excluded from throughput timing (default: 10)')
+    parser.add_argument('--benchmark-measure-iterations', type=int, default=30,
+                        help='Iterations included in throughput timing (default: 30)')
     parser.add_argument('--verbose', action='store_true', default=False, help='Enable verbose logging')
     parser.add_argument('--use-adam', action='store_true', default=False, help='use ADAM optimizer')
     parser.add_argument('--use-cuda-env', action='store_true', default=False, help='use CUDA for ALE updates')

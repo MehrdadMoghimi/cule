@@ -17,6 +17,7 @@ from a2c.model import ActorCritic
 from a2c.test import test
 
 def worker(gpu, ngpus_per_node, args):
+    solution_wall_start = time.time()
     env_device, train_device = args_initialize(gpu, ngpus_per_node, args)
 
     # benchmark?
@@ -37,7 +38,7 @@ def worker(gpu, ngpus_per_node, args):
 
         args.evaluation_interval = args.t_max # no eval while benchmarking!
 
-        benchmark_steps = 100
+        benchmark_steps = args.benchmark_measure_iterations
 
     double_testing = args.double_test
 
@@ -112,9 +113,9 @@ def worker(gpu, ngpus_per_node, args):
 
     iterator = range(total_steps)
     if args.rank == 0:
-        iterator = tqdm(iterator)
+        iterator = tqdm(iterator, disable=args.no_progress)
         total_time = 0
-        evaluation_offset = 0
+        evaluation_offset = args.evaluation_interval if args.skip_initial_evaluation else 0
 
     # benchmark - random
     if args.benchmark:
@@ -174,6 +175,13 @@ def worker(gpu, ngpus_per_node, args):
                     if args.plot:
                         summary_writer.add_scalar('eval/rewards_mean', rmean, T, walltime=total_time)
                         summary_writer.add_scalar('eval/lengths_mean', lmean, T, walltime=total_time)
+
+                    if args.solve_reward is not None and rmean >= args.solve_reward:
+                        result = {'algorithm': 'vtrace', 'frames': T,
+                                  'reward_mean': rmean, 'training_seconds': total_time,
+                                  'worker_wall_seconds': time.time() - solution_wall_start}
+                        print('SOLVED_RESULT ' + json.dumps(result, sort_keys=True), flush=True)
+                        break
 
                 else:
 

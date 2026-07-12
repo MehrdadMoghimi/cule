@@ -1,3 +1,4 @@
+import json
 import math
 import time
 import torch
@@ -14,6 +15,7 @@ from model import ActorCritic
 from test import test
 
 def worker(gpu, ngpus_per_node, args):
+    solution_wall_start = time.time()
     env_device, train_device = args_initialize(gpu, ngpus_per_node, args)
     train_csv_file, train_csv_writer, eval_csv_file, eval_csv_writer, summary_writer = log_initialize(args, train_device)
     train_env, test_env, observation = env_initialize(args, env_device)
@@ -23,6 +25,8 @@ def worker(gpu, ngpus_per_node, args):
 
     num_frames_per_iter = args.num_ales * args.num_steps
     total_steps = math.ceil(args.t_max / (args.world_size * num_frames_per_iter))
+    if args.throughput_benchmark:
+        total_steps = args.benchmark_warmup_iterations + args.benchmark_measure_iterations
 
     shape = (args.num_steps + 1, args.num_ales, args.num_stack, *train_env.observation_space.shape[-2:])
     states = torch.zeros(shape, device=train_device, dtype=torch.float32)
@@ -52,14 +56,14 @@ def worker(gpu, ngpus_per_node, args):
 
     iterator = range(total_steps)
     if args.rank == 0:
-        iterator = tqdm(iterator)
+        iterator = tqdm(iterator, disable=args.throughput_benchmark or args.no_progress)
         total_time = 0
-        evaluation_offset = 0
+        evaluation_offset = args.evaluation_interval if args.skip_initial_evaluation else 0
 
     for update in iterator:
 
         T = args.world_size * update * num_frames_per_iter
-        if (args.rank == 0) and (T >= evaluation_offset):
+        if (not args.throughput_benchmark) and (args.rank == 0) and (T >= evaluation_offset):
             evaluation_offset += args.evaluation_interval
             eval_lengths, eval_rewards = test(args, model, test_env)
 
@@ -76,6 +80,13 @@ def worker(gpu, ngpus_per_node, args):
             if args.plot:
                 summary_writer.add_scalar('eval/rewards_mean', rmean, T, walltime=total_time)
                 summary_writer.add_scalar('eval/lengths_mean', lmean, T, walltime=total_time)
+
+            if args.solve_reward is not None and rmean >= args.solve_reward:
+                result = {'algorithm': 'a2c', 'frames': T, 'reward_mean': rmean,
+                          'training_seconds': total_time,
+                          'worker_wall_seconds': time.time() - solution_wall_start}
+                print('SOLVED_RESULT ' + json.dumps(result, sort_keys=True), flush=True)
+                break
 
         start_time = time.time()
 
@@ -167,7 +178,20 @@ def worker(gpu, ngpus_per_node, args):
             iter_time = time.time() - start_time
             total_time += iter_time
 
-            if args.plot:
+            if args.throughput_benchmark and update >= args.benchmark_warmup_iterations:
+                measured = update - args.benchmark_warmup_iterations + 1
+                if measured == 1:
+                    benchmark_time = 0.0
+                benchmark_time += iter_time
+                if measured == args.benchmark_measure_iterations:
+                    result = {'algorithm': 'a2c',
+                              'fps': measured * args.world_size * num_frames_per_iter / benchmark_time,
+                              'seconds': benchmark_time,
+                              'measured_iterations': measured}
+                    print('THROUGHPUT_RESULT ' + json.dumps(result, sort_keys=True), flush=True)
+                    break
+
+            if args.plot and not args.throughput_benchmark:
                 summary_writer.add_scalar('train/rewards_mean', final_rewards.mean().item(), T, walltime=total_time)
                 summary_writer.add_scalar('train/lengths_mean', final_lengths.mean().item(), T, walltime=total_time)
                 summary_writer.add_scalar('train/value_loss', value_loss, T, walltime=total_time)
@@ -178,10 +202,11 @@ def worker(gpu, ngpus_per_node, args):
                 # images = np.squeeze(np.hstack(states[0,:32].cpu()))
                 # summary_writer.add_image('train/frames', images, T, walltime=total_time)
 
-            progress_data = callback(args, model, T, iter_time, final_rewards, final_lengths,
-                                     value_loss.item(), policy_loss.item(), dist_entropy.item(),
-                                     train_csv_writer, train_csv_file)
-            iterator.set_postfix_str(progress_data)
+            if not args.throughput_benchmark:
+                progress_data = callback(args, model, T, iter_time, final_rewards, final_lengths,
+                                         value_loss.item(), policy_loss.item(), dist_entropy.item(),
+                                         train_csv_writer, train_csv_file)
+                iterator.set_postfix_str(progress_data)
 
     if args.plot and (args.rank == 0):
         summary_writer.close()

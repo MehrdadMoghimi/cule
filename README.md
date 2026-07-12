@@ -180,6 +180,32 @@ Pong): ~66k agent steps/s raw environment throughput, ~36k FPS inference,
   `--evaluation-interval`, and `--num-steps-per-update` > 1 (reuses each
   rollout for more updates at some sample-efficiency cost).
 
+## Throughput search
+
+`examples/benchmark_search.py` runs resumable full-training throughput sweeps
+for A2C, PPO, and V-trace.  It excludes evaluation and file I/O, warms up each
+configuration, and appends every result (including failures) to JSONL:
+
+```
+conda run -n cule312 python examples/benchmark_search.py \
+  --profile quick --output benchmark_results/quick.jsonl
+```
+
+Use `--profile full` for a wider sweep, or target a region explicitly:
+
+```
+conda run -n cule312 python examples/benchmark_search.py \
+  --algorithms a2c vtrace --env-counts 2000 2400 2800 3200 \
+  --rollout-steps 5 --normalization both --repeats 3 \
+  --output benchmark_results/refinement.jsonl
+```
+
+The reported FPS includes environment stepping, policy inference, return/loss
+calculation, backpropagation, and optimizer updates.  Changing PPO epochs,
+V-trace minibatches, or update frequency changes the learning workload, so
+compare such results with those settings visible rather than as equivalent
+training runs.
+
 # Testing
 
 The repository ships a pytest suite covering ROM resolution, the CPU and GPU
