@@ -131,6 +131,9 @@ def log_initialize(args, device):
 def model_initialize(args, model, device):
     model = model.to(device).train()
 
+    if getattr(args, 'torch_compile', False):
+        model = torch.compile(model)
+
     if args.verbose:
         print(model)
         args.model_name = model.name()

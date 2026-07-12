@@ -47,6 +47,10 @@ def add_global_parser_options(parser):
     parser.add_argument('--save-interval', type=int, default=0, help='Interval to save model to file (default: 0)')
     parser.add_argument('--seed', type=int, default=int(time.time()), help='random seed (default: time())')
     parser.add_argument('--t-max', type=int, default=int(50e6), help='Number of training steps (default: 50,000,000)')
+    parser.add_argument('--torch-compile', action='store_true', default=False,
+                        help='Wrap the model in torch.compile (experimental; measured '
+                             'slower than eager for these small models — see README '
+                             'performance notes)')
     parser.add_argument('--verbose', action='store_true', default=False, help='Enable verbose logging')
     parser.add_argument('--use-adam', action='store_true', default=False, help='use ADAM optimizer')
     parser.add_argument('--use-cuda-env', action='store_true', default=False, help='use CUDA for ALE updates')

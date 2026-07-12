@@ -163,6 +163,27 @@ space_invaders, tennis, tutankham, venture, yars_revenge
 Other ale-py roms load as well, but without game-specific reward/lives
 decoding they are not useful for training.
 
+# Performance notes
+
+Measured on an RTX 4090 with the README vtrace configuration (1200 envs,
+Pong): ~66k agent steps/s raw environment throughput, ~36k FPS inference,
+~30k FPS full training.
+
+- **Where the time goes**: the policy network is tiny, so training throughput
+  is dominated by the environment dispatch (CuLE synchronizes the device
+  after every kernel), the rollout-buffer copies, and Python overhead — not
+  by the model. Evaluation episodes run on the CPU and dominate *wall-clock*
+  time when `--evaluation-interval` is small.
+- **`torch.compile` does not help here** (measured: 10–45% *slower* end to
+  end, both with and without `--normalize`). The convnet is too small a
+  fraction of the loop to win anything, and dynamo guard overhead plus
+  graph breaks in the running-normalization path cost more than the fused
+  kernels save. The `--torch-compile` flag exists so you can re-measure on
+  your own hardware.
+- **What actually helps**: larger `--num-ales` (up to GPU memory), a larger
+  `--evaluation-interval`, and `--num-steps-per-update` > 1 (reuses each
+  rollout for more updates at some sample-efficiency cost).
+
 # Testing
 
 The repository ships a pytest suite covering ROM resolution, the CPU and GPU

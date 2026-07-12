@@ -14,6 +14,15 @@ import torch
 from torchcule.atari import Env, Rom
 from utils.openai.envs import create_vectorize_atari_env
 
+def to_numpy(data):
+    return data.cpu().numpy() if torch.is_tensor(data) else np.asarray(data)
+
+def tile_frames(observations):
+    obs = to_numpy(observations)
+    if obs.ndim == 4 and obs.shape[1] in (1, 3) and obs.shape[-1] not in (1, 3):
+        obs = obs.transpose(0, 2, 3, 1)  # NCHW (openai wrapper) -> NHWC
+    return np.squeeze(np.hstack(obs))
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='CuLE')
     parser.add_argument('--color', type=str, default='rgb', help='Color mode (rgb or gray)')
@@ -28,10 +37,9 @@ if __name__ == '__main__':
     parser.add_argument('--use-openai', action='store_true', default=False, help='Use OpenAI Gym environment')
     args = parser.parse_args()
 
-    cmap   = None if args.color == 'rgb' else 'gray'
+    cmap   = None if (args.color == 'rgb') and not args.use_openai else 'gray'
     device = torch.device('cuda:{}'.format(args.gpu) if args.use_cuda else 'cpu')
     debug  = args.debug
-    num_actions = 4
     num_envs = args.num_envs
 
     if args.use_openai:
@@ -45,11 +53,23 @@ if __name__ == '__main__':
 
         if args.training:
             env.train()
-        observations = env.reset(initial_steps=args.initial_steps, verbose=True).cpu().numpy()
+        observations = env.reset(initial_steps=args.initial_steps, verbose=True)
 
-    fig = plt.figure()
-    img = plt.imshow(np.squeeze(np.hstack(observations)), animated=True, cmap=cmap)
-    ax = fig.add_subplot(111)
+    def sample_actions():
+        if args.use_openai:
+            return np.array([env.action_space.sample() for _ in range(num_envs)])
+        return env.sample_random_actions()
+
+    fig, ax = plt.subplots()
+    # The reset frame can be all zeros, so fix the color limits instead of
+    # letting imshow derive them from the first frame (grayscale would
+    # otherwise render saturated). Note: animated=True must NOT be passed
+    # here — without blitting, modern matplotlib skips animated artists
+    # during regular draws, leaving an empty white canvas.
+    first = tile_frames(observations)
+    clim = {} if first.ndim == 3 else {'vmin': 0, 'vmax': 255}
+    img = ax.imshow(first, cmap=cmap, **clim)
+    ax.axis('off')
 
     frame = 0
 
@@ -58,23 +78,20 @@ if __name__ == '__main__':
     else:
         fig.suptitle(frame)
 
-    def updatefig(*args):
-        global ax, debug, env, frame, img, num_envs
+    def updatefig(*fargs):
+        global ax, debug, env, frame, img
 
         if debug:
             input('Press Enter to continue...')
 
-        actions = env.sample_random_actions()
-        # actions = np.random.randint(0, num_actions, (num_envs,))
+        actions = sample_actions()
 
         observations, reward, done, info = env.step(actions)
-        observations = observations.cpu().numpy()
-        reward = reward.cpu().numpy()
-        done = done.cpu().numpy()
-        img.set_array(np.squeeze(np.hstack(observations)))
+        img.set_array(tile_frames(observations))
 
         if debug:
-            ax.title.set_text('{}) rewards: {}, done: {}'.format(frame, reward, done))
+            ax.title.set_text('{}) rewards: {}, done: {}'.format(
+                frame, to_numpy(reward), to_numpy(done)))
         else:
             fig.suptitle(frame)
 
@@ -82,8 +99,7 @@ if __name__ == '__main__':
 
         return img,
 
-    ani = animation.FuncAnimation(fig, updatefig, interval=10, blit=False)
-    plt.axis('off')
+    ani = animation.FuncAnimation(fig, updatefig, interval=10, blit=False,
+                                  cache_frame_data=False)
     plt.tight_layout()
     plt.show()
-
