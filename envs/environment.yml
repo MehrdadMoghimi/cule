@@ -6,6 +6,7 @@ dependencies:
         - pip
         - pip:
                 - torch
+                - torchrl==0.13.2
                 - gymnasium
                 - ale-py
                 - numpy
