@@ -20,6 +20,12 @@ namespace atari
 namespace cuda
 {
 
+// All kernels in this file are one-thread-per-environment with no cross-thread
+// cooperation. The NT template parameter only bounds the launch configuration
+// (__launch_bounds__); the actual block size is chosen at launch time and all
+// indexing uses blockDim.x, so any block size <= NT is valid and produces
+// bit-identical results.
+
 template<typename State_t, size_t NT>
 __launch_bounds__(NT) __global__
 void initialize_frame_states_kernel(const uint32_t noop_reset_steps,
@@ -32,7 +38,7 @@ void initialize_frame_states_kernel(const uint32_t noop_reset_steps,
                                     const uint8_t* m1_base,
                                     const uint8_t* bl_base)
 {
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
     if(global_index >= noop_reset_steps)
     {
@@ -73,7 +79,7 @@ void initialize_states_kernel(const uint32_t num_envs,
         NUM_INT_REGS = 128 / sizeof(uint32_t),
     };
 
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
     if(global_index >= num_envs)
     {
@@ -96,12 +102,14 @@ void initialize_states_kernel(const uint32_t num_envs,
         ram[i] = ram_int[i];
     }
 
-    ram_int = ((uint32_t*) ram_buffer) + (NUM_INT_REGS * NT * blockIdx.x) + threadIdx.x;
+    // per-env RAM is stored linearly (matching the CPU backend, get_data_kernel,
+    // and the Python env.ram view) so the layout is independent of block size
+    ram_int = ((uint32_t*) ram_buffer) + (NUM_INT_REGS * global_index);
 
     #pragma loop unroll
     for(int32_t i = 0; i < NUM_INT_REGS; i++)
     {
-        ram_int[i * NT] = ram[i];
+        ram_int[i] = ram[i];
     }
 }
 
@@ -123,7 +131,7 @@ void reset_kernel(const uint32_t num_envs,
         NUM_INT_REGS = 128 / sizeof(uint32_t),
     };
 
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
     if(global_index >= num_envs)
     {
@@ -150,12 +158,12 @@ void reset_kernel(const uint32_t num_envs,
             ram[i] = ram_int[i];
         }
 
-        ram_int = ((uint32_t*) ram_buffer) + (NUM_INT_REGS * NT * blockIdx.x) + threadIdx.x;
+        ram_int = ((uint32_t*) ram_buffer) + (NUM_INT_REGS * global_index);
 
         #pragma loop unroll
         for(int32_t i = 0; i < NUM_INT_REGS; i++)
         {
-            ram_int[i * NT] = ram[i];
+            ram_int[i] = ram[i];
         }
     }
 }
@@ -176,7 +184,7 @@ void step_kernel(const uint32_t num_envs,
         NUM_INT_REGS = 128 / sizeof(uint32_t),
     };
 
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
     if((global_index >= num_envs) || done_buffer[global_index])
     {
@@ -192,12 +200,12 @@ void step_kernel(const uint32_t num_envs,
     {
         state_store_load_helper(s, *states_buffer);
 
-        uint32_t * ram_int = ((uint32_t*) ram_buffer) + (NUM_INT_REGS * NT * blockIdx.x) + threadIdx.x;
+        uint32_t * ram_int = ((uint32_t*) ram_buffer) + (NUM_INT_REGS * global_index);
 
         #pragma loop unroll
         for(int32_t i = 0; i < NUM_INT_REGS; i++)
         {
-            ram[i] = ram_int[i * NT];
+            ram[i] = ram_int[i];
         }
     }
 
@@ -228,12 +236,12 @@ void step_kernel(const uint32_t num_envs,
     {
         state_store_load_helper(*states_buffer, s);
 
-        uint32_t * ram_int = ((uint32_t*) ram_buffer) + (NUM_INT_REGS * NT * blockIdx.x) + threadIdx.x;
+        uint32_t * ram_int = ((uint32_t*) ram_buffer) + (NUM_INT_REGS * global_index);
 
         #pragma loop unroll
         for(int32_t i = 0; i < NUM_INT_REGS; i++)
         {
-            ram_int[i * NT] = ram[i];
+            ram_int[i] = ram[i];
         }
     }
 }
@@ -249,7 +257,7 @@ void get_data_kernel(const int32_t num_envs,
                      int32_t* lives_buffer)
 {
 
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
     if((global_index >= num_envs) || done_buffer[global_index])
     {
@@ -272,6 +280,9 @@ void get_data_kernel(const int32_t num_envs,
     s.score = ALE_t::getScore(s);
 }
 
+// One environment per block: every lane executes the identical warp-uniform
+// TIA replay while pixel spans are strided across the lanes (see
+// preprocess.hpp), so any block size from 1 to NT renders bit-identically.
 template<typename State_t, size_t NT>
 __launch_bounds__(NT) __global__
 void process_kernel(const uint32_t num_envs,
@@ -283,7 +294,7 @@ void process_kernel(const uint32_t num_envs,
                     frame_state* frame_states_buffer,
                     uint8_t* frame_buffer)
 {
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = blockIdx.x;
 
     if(global_index >= num_envs)
     {
@@ -300,16 +311,28 @@ void process_kernel(const uint32_t num_envs,
     const bool is_terminal = s.tiaFlags[FLAG_ALE_TERMINAL];
     const bool is_started  = s.tiaFlags[FLAG_ALE_STARTED];
 
-    if(last_frame && is_started && is_terminal)
+    const bool substitute_cached = last_frame && is_started && is_terminal;
+    if(substitute_cached)
     {
-        states_buffer[global_index].tiaFlags.clear(FLAG_ALE_TERMINAL);
         fs.srcBuffer = cached_tia_update_buffer + (cache_index_buffer[global_index] * ENV_UPDATE_SIZE);
     }
     fs.framePointer = frame_buffer == nullptr ? nullptr : &frame_buffer[global_index * 300 * SCREEN_WIDTH];
 
+    // every lane has now read the shared per-env state; barrier before lane 0
+    // mutates it so slower lanes cannot observe the updated flags
+    __syncthreads();
+
+    if(substitute_cached && (threadIdx.x == 0))
+    {
+        states_buffer[global_index].tiaFlags.clear(FLAG_ALE_TERMINAL);
+    }
+
     preprocess::state_to_buffer(fs);
 
-    state_store_load_helper(*frame_states_buffer, fs);
+    if(threadIdx.x == 0)
+    {
+        state_store_load_helper(*frame_states_buffer, fs);
+    }
 }
 
 template<size_t NT>
@@ -320,7 +343,7 @@ void apply_palette_kernel(const int32_t num_envs,
                           uint8_t* dst_buffer,
                           const uint8_t* src_buffer)
 {
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
     if(global_index < num_envs * screen_height * SCREEN_WIDTH)
     {
@@ -354,7 +377,7 @@ void apply_rescale_kernel(const int32_t num_envs,
                           uint8_t * dst_buffer,
                           const uint8_t * src_buffer)
 {
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
     if(global_index < (num_envs * SCALED_SCREEN_SIZE))
     {
@@ -400,7 +423,7 @@ void action_kernel(const uint32_t num_envs,
                    uint32_t* rand_states_ptr,
                    Action* actionsBuffer)
 {
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
     if(global_index >= num_envs)
     {
@@ -426,7 +449,7 @@ void get_states_kernel(const uint32_t num_envs,
                        const uint8_t* ram_buffer,
                        uint8_t* output_states_ram)
 {
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
     if(global_index >= num_envs)
     {
@@ -461,7 +484,7 @@ void set_states_kernel(const uint32_t num_envs,
                        uint8_t* ram_buffer,
                        const uint8_t* input_states_ram)
 {
-    const uint32_t global_index = (NT * blockIdx.x) + threadIdx.x;
+    const uint32_t global_index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
     if(global_index >= num_envs)
     {

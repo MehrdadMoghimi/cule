@@ -237,3 +237,48 @@ def test_training_mode_fire_reset_flag():
     env2 = make_env('cuda', game='PongNoFrameskip-v4', num_envs=2)
     env2.train(frameskip=4)
     assert env2.is_training and env2.frameskip == 4
+
+@requires_cuda
+def test_render_lanes_bit_identical():
+    """The warp-cooperative frame renderer must produce bit-identical frames
+    for any CULE_RENDER_LANES value (lane count 1 executes the original
+    serial store order, so 1 vs 32 catches any cooperative-rendering bug).
+    The variable is latched on first kernel launch, hence the subprocesses."""
+    import os
+    import subprocess
+    import sys
+    import tempfile
+
+    script = (
+        "import sys, torch\n"
+        "from torchcule.atari import Env\n"
+        "torch.manual_seed(5)\n"
+        "env = Env('BreakoutNoFrameskip-v4', 16, color_mode='gray',\n"
+        "          device='cuda', rescale=True, frameskip=4,\n"
+        "          episodic_life=True)\n"
+        "env.train(4)\n"
+        "env.reset(initial_steps=20)\n"
+        "gen = torch.Generator().manual_seed(123)\n"
+        "frames = []\n"
+        "for _ in range(12):\n"
+        "    a = torch.randint(env.action_space.n, (16,), generator=gen,\n"
+        "                      dtype=torch.uint8).to('cuda')\n"
+        "    obs, rew, done, _ = env.step(a)\n"
+        "    frames.append(obs.cpu().clone())\n"
+        "torch.save(torch.stack(frames), sys.argv[1])\n"
+    )
+
+    results = {}
+    for lanes in (1, 32):
+        fd, path = tempfile.mkstemp(suffix='.pt')
+        os.close(fd)
+        try:
+            env_vars = dict(os.environ, CULE_RENDER_LANES=str(lanes))
+            subprocess.run([sys.executable, '-c', script, path],
+                           env=env_vars, check=True, timeout=300)
+            results[lanes] = torch.load(path, weights_only=True)
+        finally:
+            os.unlink(path)
+
+    assert torch.equal(results[1], results[32]), \
+        'frame rendering must not depend on the render lane count'

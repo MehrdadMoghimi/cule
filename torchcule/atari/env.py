@@ -278,8 +278,6 @@ class Env(torchcule_atari.AtariEnv):
         assert player_a_actions.size(0) == self.num_envs
 
         self.rewards.zero_()
-        self.observations1.zero_()
-        self.observations2.zero_()
         self.done.zero_()
 
         self.player_a_actions = self.action_set[player_a_actions.long()]
@@ -308,6 +306,10 @@ class Env(torchcule_atari.AtariEnv):
             if not asyn:
                 torch.cuda.current_stream().synchronize()
 
+        # generate_frames overwrites every pixel of the rendered observation, so
+        # the buffers are never zeroed between steps (observations2 keeps its
+        # zeros from allocation when frameskip == 1 and is fully rendered at
+        # frame frameskip - 2 otherwise)
         self.observations1 = torch.max(self.observations1, self.observations2)
 
         info = {'ale.lives': self.lives}

@@ -12,12 +12,68 @@
 
 #include <agency/agency.hpp>
 
+#include <algorithm>
+#include <cstdlib>
+
 namespace cule
 {
 namespace atari
 {
 namespace dispatch
 {
+
+// The emulation and frame-rendering kernels are one thread per environment
+// and their block size is a runtime launch parameter (results are
+// bit-identical for any block size; see cule/atari/cuda/kernels.hpp).
+//
+// The default of 1 thread per block is deliberate and was re-validated
+// empirically (RTX 4090): packing several environments into one warp makes the
+// divergent 6502/TIA interpreter serialize across lanes and reduces the number
+// of SMs covered, costing up to ~7x at trainer-scale environment counts.
+// Block size 1 also lets ptxas allocate registers freely (larger bounds force
+// spills in the interpreter loop). The environment variables below exist for
+// experimentation on GPUs with different SM counts/occupancy limits.
+enum : size_t { MAX_ENV_BLOCK_SIZE = 256UL };
+
+inline size_t block_size_from_env(const char* name, const size_t fallback)
+{
+    size_t value = fallback;
+
+    const char* str = std::getenv(name);
+    if(str != nullptr)
+    {
+        const long parsed = std::atol(str);
+        if(parsed >= 1)
+        {
+            value = size_t(parsed);
+        }
+    }
+
+    return std::min(value, size_t(MAX_ENV_BLOCK_SIZE));
+}
+
+// Block size for the emulation kernels (step/reset/initialize), overridable
+// with CULE_STEP_BLOCK_SIZE.
+inline size_t step_block_size()
+{
+    static const size_t value = block_size_from_env("CULE_STEP_BLOCK_SIZE", 1UL);
+    return value;
+}
+
+// Cooperating threads per environment for the TIA frame-rendering kernel
+// (one thread block per environment; lanes stride the pixel spans while all
+// replay the same update stream). Bit-identical for any lane count;
+// overridable with CULE_RENDER_LANES.
+inline size_t render_lanes()
+{
+    static const size_t value = block_size_from_env("CULE_RENDER_LANES", 32UL);
+    return value;
+}
+
+inline size_t num_blocks_for(const size_t count, const size_t block_size)
+{
+    return (count + block_size - 1) / block_size;
+}
 
 template<typename Environment,
          typename Wrapper>
@@ -26,8 +82,8 @@ reset(cule::cuda::parallel_execution_policy& policy,
       Wrapper& wrap,
       uint32_t*)
 {
-    const size_t BLOCK_SIZE = 1UL;
-    const size_t NUM_BLOCKS = std::ceil(float(wrap.size()) / BLOCK_SIZE);
+    const size_t BLOCK_SIZE = step_block_size();
+    const size_t NUM_BLOCKS = num_blocks_for(wrap.size(), BLOCK_SIZE);
 
     using State_t = typename Wrapper::State_t;
 
@@ -83,17 +139,34 @@ reset(cule::cuda::parallel_execution_policy& policy,
         &ball_accessor(0, 0, 0));
     CULE_CUDA_PEEK_AND_SYNC;
 
-    cule::atari::cuda::initialize_states_kernel<State_t, BLOCK_SIZE>
-    <<<NUM_BLOCKS, BLOCK_SIZE, 0, policy.getStream()>>>(
-        wrap.size(),
-        wrap.noop_reset_steps,
-        wrap.states_ptr,
-        wrap.ram_ptr,
-        wrap.cached_states_ptr,
-        wrap.cached_ram_ptr,
-        wrap.rand_states_ptr,
-        wrap.frame_states_ptr,
-        wrap.cached_frame_states_ptr);
+    if(BLOCK_SIZE == 1)
+    {
+        cule::atari::cuda::initialize_states_kernel<State_t, 1>
+        <<<NUM_BLOCKS, 1, 0, policy.getStream()>>>(
+            wrap.size(),
+            wrap.noop_reset_steps,
+            wrap.states_ptr,
+            wrap.ram_ptr,
+            wrap.cached_states_ptr,
+            wrap.cached_ram_ptr,
+            wrap.rand_states_ptr,
+            wrap.frame_states_ptr,
+            wrap.cached_frame_states_ptr);
+    }
+    else
+    {
+        cule::atari::cuda::initialize_states_kernel<State_t, MAX_ENV_BLOCK_SIZE>
+        <<<NUM_BLOCKS, BLOCK_SIZE, 0, policy.getStream()>>>(
+            wrap.size(),
+            wrap.noop_reset_steps,
+            wrap.states_ptr,
+            wrap.ram_ptr,
+            wrap.cached_states_ptr,
+            wrap.cached_ram_ptr,
+            wrap.rand_states_ptr,
+            wrap.frame_states_ptr,
+            wrap.cached_frame_states_ptr);
+    }
     CULE_CUDA_PEEK_AND_SYNC;
 }
 
@@ -105,21 +178,39 @@ reset_states(cule::cuda::parallel_execution_policy& policy,
 {
     using State_t = typename Wrapper::State_t;
 
-    const size_t BLOCK_SIZE = 1UL;
-    const size_t NUM_BLOCKS = std::ceil(float(wrap.size()) / BLOCK_SIZE);
+    const size_t BLOCK_SIZE = step_block_size();
+    const size_t NUM_BLOCKS = num_blocks_for(wrap.size(), BLOCK_SIZE);
 
-    cule::atari::cuda::reset_kernel<State_t, BLOCK_SIZE>
-    <<<NUM_BLOCKS, BLOCK_SIZE, 0, policy.getStream()>>>(
-        wrap.size(),
-        wrap.noop_reset_steps,
-        wrap.states_ptr,
-        wrap.ram_ptr,
-        wrap.cached_states_ptr,
-        wrap.cached_ram_ptr,
-        wrap.frame_states_ptr,
-        wrap.cached_frame_states_ptr,
-        wrap.cache_index_ptr,
-        wrap.rand_states_ptr);
+    if(BLOCK_SIZE == 1)
+    {
+        cule::atari::cuda::reset_kernel<State_t, 1>
+        <<<NUM_BLOCKS, 1, 0, policy.getStream()>>>(
+            wrap.size(),
+            wrap.noop_reset_steps,
+            wrap.states_ptr,
+            wrap.ram_ptr,
+            wrap.cached_states_ptr,
+            wrap.cached_ram_ptr,
+            wrap.frame_states_ptr,
+            wrap.cached_frame_states_ptr,
+            wrap.cache_index_ptr,
+            wrap.rand_states_ptr);
+    }
+    else
+    {
+        cule::atari::cuda::reset_kernel<State_t, MAX_ENV_BLOCK_SIZE>
+        <<<NUM_BLOCKS, BLOCK_SIZE, 0, policy.getStream()>>>(
+            wrap.size(),
+            wrap.noop_reset_steps,
+            wrap.states_ptr,
+            wrap.ram_ptr,
+            wrap.cached_states_ptr,
+            wrap.cached_ram_ptr,
+            wrap.frame_states_ptr,
+            wrap.cached_frame_states_ptr,
+            wrap.cache_index_ptr,
+            wrap.rand_states_ptr);
+    }
     // CULE_CUDA_PEEK_AND_SYNC;
 }
 
@@ -135,19 +226,35 @@ step(cule::cuda::parallel_execution_policy& policy,
 {
     using State_t = typename Wrapper::State_t;
 
-    const size_t BLOCK_SIZE = 1UL;
-    const size_t NUM_BLOCKS = std::ceil(float(wrap.size()) / BLOCK_SIZE);
+    const size_t BLOCK_SIZE = step_block_size();
+    const size_t NUM_BLOCKS = num_blocks_for(wrap.size(), BLOCK_SIZE);
 
-    cule::atari::cuda::step_kernel<State_t, Environment, BLOCK_SIZE>
-    <<<NUM_BLOCKS, BLOCK_SIZE, 0, policy.getStream()>>>(
-        wrap.size(),
-        fire_reset,
-        wrap.states_ptr,
-        wrap.ram_ptr,
-        wrap.tia_update_ptr,
-        playerABuffer,
-        playerBBuffer,
-        doneBuffer);
+    if(BLOCK_SIZE == 1)
+    {
+        cule::atari::cuda::step_kernel<State_t, Environment, 1>
+        <<<NUM_BLOCKS, 1, 0, policy.getStream()>>>(
+            wrap.size(),
+            fire_reset,
+            wrap.states_ptr,
+            wrap.ram_ptr,
+            wrap.tia_update_ptr,
+            playerABuffer,
+            playerBBuffer,
+            doneBuffer);
+    }
+    else
+    {
+        cule::atari::cuda::step_kernel<State_t, Environment, MAX_ENV_BLOCK_SIZE>
+        <<<NUM_BLOCKS, BLOCK_SIZE, 0, policy.getStream()>>>(
+            wrap.size(),
+            fire_reset,
+            wrap.states_ptr,
+            wrap.ram_ptr,
+            wrap.tia_update_ptr,
+            playerABuffer,
+            playerBBuffer,
+            doneBuffer);
+    }
     // CULE_CUDA_PEEK_AND_SYNC;
 }
 
@@ -165,7 +272,7 @@ get_data(cule::cuda::parallel_execution_policy& policy,
     using ALE_t = typename Environment::ALE_t;
 
     const size_t BLOCK_SIZE = 256UL;
-    const size_t NUM_BLOCKS = std::ceil(float(wrap.size()) / BLOCK_SIZE);
+    const size_t NUM_BLOCKS = num_blocks_for(wrap.size(), BLOCK_SIZE);
 
     cule::atari::cuda::get_data_kernel<State_t, ALE_t, BLOCK_SIZE>
     <<<NUM_BLOCKS, BLOCK_SIZE, 0, policy.getStream()>>>(
@@ -190,11 +297,9 @@ preprocess(cule::cuda::parallel_execution_policy& policy,
 {
     using State_t = typename Wrapper::State_t;
 
-    const size_t BLOCK_SIZE = 1UL;
-    const size_t NUM_BLOCKS = std::ceil(float(wrap.size()) / BLOCK_SIZE);
-
-    cule::atari::cuda::process_kernel<State_t, BLOCK_SIZE>
-    <<<NUM_BLOCKS, BLOCK_SIZE, 0, policy.getStream()>>>(
+    // one block per environment; blockDim.x lanes cooperate on the rendering
+    cule::atari::cuda::process_kernel<State_t, MAX_ENV_BLOCK_SIZE>
+    <<<wrap.size(), render_lanes(), 0, policy.getStream()>>>(
         wrap.size(),
         last_frame,
         tiaBuffer,
@@ -215,7 +320,7 @@ generate_frames(cule::cuda::parallel_execution_policy& policy,
                 uint8_t* imageBuffer)
 {
     const size_t BLOCK_SIZE = 1024UL;
-    const size_t NUM_BLOCKS = std::ceil(float(wrap.image_buffer_size(num_channels, rescale) / num_channels) / BLOCK_SIZE);
+    const size_t NUM_BLOCKS = num_blocks_for(wrap.image_buffer_size(num_channels, rescale) / num_channels, BLOCK_SIZE);
 
     if(rescale)
     {
@@ -249,7 +354,7 @@ generate_random_actions(cule::cuda::parallel_execution_policy& policy,
     using State_t = typename Wrapper::State_t;
 
     const size_t BLOCK_SIZE = 256UL;
-    const size_t NUM_BLOCKS = std::ceil(float(wrap.size()) / BLOCK_SIZE);
+    const size_t NUM_BLOCKS = num_blocks_for(wrap.size(), BLOCK_SIZE);
 
     const size_t num_entries = N == 0 ? wrap.size() : N;
 
@@ -277,7 +382,7 @@ get_states(cule::cuda::parallel_execution_policy& policy,
     using State_t = typename Wrapper::State_t;
 
     const size_t BLOCK_SIZE = 128UL;
-    const size_t NUM_BLOCKS = std::ceil(float(num_states) / BLOCK_SIZE);
+    const size_t NUM_BLOCKS = num_blocks_for(num_states, BLOCK_SIZE);
 
     cule::atari::cuda::get_states_kernel<State_t, BLOCK_SIZE>
     <<<NUM_BLOCKS, BLOCK_SIZE, 0, policy.getStream()>>>(
@@ -305,7 +410,7 @@ set_states(cule::cuda::parallel_execution_policy& policy,
     using State_t = typename Wrapper::State_t;
 
     const size_t BLOCK_SIZE = 128UL;
-    const size_t NUM_BLOCKS = std::ceil(float(num_states) / BLOCK_SIZE);
+    const size_t NUM_BLOCKS = num_blocks_for(num_states, BLOCK_SIZE);
 
     cule::atari::cuda::set_states_kernel<State_t, BLOCK_SIZE>
     <<<NUM_BLOCKS, BLOCK_SIZE, 0, policy.getStream()>>>(

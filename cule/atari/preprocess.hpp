@@ -77,6 +77,55 @@ int32_t clockStopDisplay(State_t& s)
     return clockStartDisplay(s) + (228 *  (is_ntsc(s) ? 210 : 250));
 }
 
+// On the GPU the frame renderer runs with one thread block per environment:
+// every lane executes the identical (redundant, warp-uniform) TIA replay and
+// the pixel spans are strided across the lanes, so writes are disjoint and the
+// result is bit-identical for any lane count. On the CPU lane()/lane_count()
+// are 0/1 and these loops degenerate to the original serial code.
+CULE_ANNOTATION
+uint32_t render_lane()
+{
+#ifdef __CUDA_ARCH__
+    return threadIdx.x;
+#else
+    return 0;
+#endif
+}
+
+CULE_ANNOTATION
+uint32_t render_lane_count()
+{
+#ifdef __CUDA_ARCH__
+    return blockDim.x;
+#else
+    return 1;
+#endif
+}
+
+CULE_ANNOTATION
+void render_zero_span(uint8_t* buffer, const int32_t& count)
+{
+#ifdef __CUDA_ARCH__
+    for(int32_t i = threadIdx.x; i < count; i += blockDim.x)
+    {
+        buffer[i] = 0;
+    }
+#else
+    memset(buffer, 0, count);
+#endif
+}
+
+// Barrier between overlapping strided writes. The TIA replay is warp-uniform
+// (every lane follows identical control flow over identical data), so calling
+// this inside a branch is safe: all lanes reach it together.
+CULE_ANNOTATION
+void render_sync()
+{
+#ifdef __CUDA_ARCH__
+    __syncthreads();
+#endif
+}
+
 CULE_ANNOTATION
 void updateFrameScanline(frame_state& s,
                          const uint32_t& clocksToUpdate,
@@ -89,14 +138,14 @@ void updateFrameScanline(frame_state& s,
     // See if we're in the vertical blank region
     if(s.tiaFlags[FLAG_TIA_VBLANK2])
     {
-        memset(s.framePointer, 0, clocksToUpdate);
+        render_zero_span(s.framePointer, clocksToUpdate);
     }
     // Handle all other possible combinations
     else
     {
-        int32_t end_pos = begin_pos + clocksToUpdate;
+        const int32_t end_pos = begin_pos + clocksToUpdate;
 
-        for(int32_t hpos = begin_pos; hpos < end_pos; ++hpos)
+        for(int32_t hpos = begin_pos + render_lane(); hpos < end_pos; hpos += render_lane_count())
         {
             uint8_t enabled = ((PF & s.CurrentPFMask[hpos]) > 0) * PFBit;
             enabled |= (s.tiaFlags[FLAG_TIA_BLBit] && s.CurrentBLMask[hpos]) * BLBit;
@@ -106,7 +155,7 @@ void updateFrameScanline(frame_state& s,
             enabled |= (s.tiaFlags[FLAG_TIA_M0Bit] && s.CurrentM0Mask[hpos]) * M0Bit;
 
             int32_t shift = 8 * int(priority_accessor(hpos < 80 ? 0 : 1, enabled | s.playfieldPriorityAndScore));
-            *s.framePointer++ = SELECT_FIELD(s.Color, 0xFF << shift);
+            s.framePointer[hpos - begin_pos] = SELECT_FIELD(s.Color, 0xFF << shift);
         }
     }
     s.framePointer = ending;
@@ -176,8 +225,14 @@ void updateFrame(frame_state& s, const int32_t& clock)
         {
             if(s.framePointer)
             {
+                // The blank region overlaps pixels drawn by the strided loop in
+                // this iteration (and, when blanks > clocksToUpdate, pixels the
+                // next iteration will draw), so the serial draw -> zero -> draw
+                // order must be enforced across lanes.
                 const int32_t blanks = (HBLANK + 8) - clocksFromStartOfScanLine;
-                memset(oldFramePointer, 0, blanks);
+                render_sync();
+                render_zero_span(oldFramePointer, blanks);
+                render_sync();
             }
 
             if((clocksToUpdate + clocksFromStartOfScanLine) >= (HBLANK + 8))
