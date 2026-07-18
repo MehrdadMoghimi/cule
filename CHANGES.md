@@ -2,8 +2,10 @@
 
 Upstream CuLE (July 2019) targets CUDA 10.0, PyTorch 1.x, Python 3.6, `gym`
 and `atari_py`. This fork runs on modern stacks — verified with CUDA 12.9,
-PyTorch 2.13 (cu130), Python 3.12, an RTX 4090 (sm_89), and Gymnasium/ale-py —
-without modifying any CUDA kernel.
+PyTorch 2.13 (cu130), Python 3.12, an RTX 4090 (sm_89), and Gymnasium/ale-py.
+Emulation semantics are unchanged (rollouts are bit-identical to upstream);
+the frame-rendering kernel was parallelized for a 34-48% throughput gain (see
+Performance below).
 
 ## Dependency replacements
 
@@ -156,12 +158,59 @@ without modifying any CUDA kernel.
   sticky actions disabled, and a thin adapter preserves the classic 4-tuple
   Gym API so the training loops and `subproc_vec_env.py` are unchanged.
 
+## Performance
+
+Measured on an RTX 4090, Breakout, grayscale 84x84, frameskip 4, random
+actions (environment stepping only, no learner):
+
+| Envs | Upstream launch config (SPS) | This fork (SPS) | Gain |
+|---:|---:|---:|---:|
+| 256 | 15,795 | 21,177 | +34% |
+| 1,024 | 54,584 | 74,937 | +37% |
+| 4,096 | 76,827 | 113,654 | +48% |
+
+- **Warp-cooperative frame rendering.** Upstream `process_kernel` launched one
+  single-thread block per environment: one thread serially replayed the TIA
+  update stream and drew all ~48K pixels, and an SM can host at most 24 such
+  blocks. The kernel now runs one block per environment with
+  `CULE_RENDER_LANES` threads (default 32): every lane executes the identical
+  warp-uniform replay while pixel spans are strided across lanes. Rendering is
+  bit-identical for any lane count (7.3x faster at the default).
+- **Dead work removed in `Env.step`**: the observation tensors are fully
+  overwritten by frame generation every step, so they are no longer zeroed.
+- **Emulation kernel launch config re-validated.** The step/reset kernels keep
+  upstream's one-thread-per-block launch: packing multiple environments per
+  warp was measured up to ~7x *slower* (the divergent 6502/TIA interpreter
+  serializes across lanes, and larger `__launch_bounds__` force register
+  spills). The block size is now a runtime parameter
+  (`CULE_STEP_BLOCK_SIZE`, default 1) for experimentation on other GPUs, and
+  per-environment RAM uses the same linear layout on every path (upstream's
+  GPU layout was block-size-interleaved, which `get_data_kernel` and the
+  Python `env.ram` view silently assumed to be linear — true only at block
+  size 1).
+- Kernel grid-size computations use integer ceiling division; the previous
+  `float` ceil could drop trailing blocks above ~16.7M elements (e.g.
+  `generate_frames` with ~100K+ environments).
+
+All optimizations are verified bit-exact against pre-change golden rollouts
+(observations, rewards, dones, lives, RAM) on both backends, across 12 games
+and lane counts {1, 7, 32, 256}, plus the full pytest suite including
+training micro-runs.
+
 ## New
 
 - `tests/` pytest suite: ROM resolution and metadata, CPU/GPU env behavior
   (shapes, rewards, episodic life, determinism, 9 games across all supported
   cartridge mappers), the Gymnasium wrapper stack, and end-to-end training
   micro-runs for a2c, vtrace, ppo and dqn (`pytest -m slow`).
+- `cleanrl/` single-file trainers with a CuLE backend (adapted from CleanRL
+  and LeanRL): PPO, recurrent PPO, DQN, C51, Rainbow, PQN, and discrete SAC,
+  plus `torch.compile`/CUDA-graph variants of PPO, DQN, C51, Rainbow, and
+  PQN. See `cleanrl/README_CULE.md`.
+- `benchmarks/` scripts for throughput sweeps (raw stepping, CuLE vs EnvPool,
+  cross-implementation) and fixed-budget learning comparisons, with matching
+  `analyze_*` aggregators. Results are written to the git-ignored
+  `benchmark_results/`; headline numbers are in the project README.
 - README sections: building on modern stacks, per-algorithm example commands,
   the list of 63 games with reward decoding (61 verified working), testing
   instructions.

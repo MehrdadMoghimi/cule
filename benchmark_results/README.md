@@ -1,5 +1,27 @@
 # RTX 4090 throughput search
 
+**2026-07-18 update:** the GPU frame-rendering kernel is now warp-cooperative,
+raising CuLE environment throughput 34-48% and compiled-PPO training
+throughput 24-31% over every number in the documents below. See
+`gpu_kernel_optimization.md` for the change, the re-measured figures, and the
+bit-exactness verification. Numbers in the other documents predate it.
+
+The Breakout CuLE-versus-EnvPool benchmark for the bundled compiled PPO and
+PQN scripts is documented in `cule_vs_envpool_breakout.md`. Its raw JSONL,
+aggregated CSV files, and machine metadata use the `cule_envpool_breakout_*`
+prefix.
+
+The broader Breakout comparison of the native CuLE A2C/DQN/PPO/V-trace
+examples, eager CleanRL trainers, and torchcompile-oriented trainers is in
+`implementation_efficiency_breakout.md`. Its raw and aggregated artifacts use
+the `implementation_breakout_*` prefix.
+
+The fixed-budget Breakout learning comparison is in
+`learning_efficiency_breakout.md`. It compares selected A2C, DQN, PPO, and
+V-trace configurations over about 10 million transitions and includes both
+sample- and training-time learning curves. Its aggregate artifacts use the
+`learning_breakout_*` prefix.
+
 Measured on 2026-07-12 with the `cule312` environment, PyTorch 2.13.0+cu130,
 an NVIDIA GeForce RTX 4090 (24 GB), and `PongNoFrameskip-v4`.  FPS includes the
 complete rollout and optimizer workload and excludes evaluation and file I/O.
@@ -12,7 +34,7 @@ complete rollout and optimizer workload and excludes evaluation and file I/O.
 
 PPO at 2,800 and 4,000 environments became numerically unstable during the
 short benchmark (invalid action probabilities), so those failed trials are
-retained in `rtx4090_quick.jsonl` rather than ranked.
+retained in `artifacts/pong/rtx4090_quick.jsonl` rather than ranked.
 
 Recommended maximum-throughput launch:
 
@@ -26,9 +48,9 @@ conda run -n cule312 python a2c_main.py \
 
 Raw results:
 
-- `rtx4090_quick.jsonl`: broad and focused searches, including failures.
-- `rtx4090_a2c_repeat.jsonl`: three repeats of the winning A2C setup.
-- `rtx4090_vtrace_repeat.jsonl`: three repeats of the winning V-trace setup.
+- `artifacts/pong/rtx4090_quick.jsonl`: broad and focused searches, including failures.
+- `artifacts/pong/rtx4090_a2c_repeat.jsonl`: three repeats of the winning A2C setup.
+- `artifacts/pong/rtx4090_vtrace_repeat.jsonl`: three repeats of the winning V-trace setup.
 
 ## Pong time-to-solve check
 

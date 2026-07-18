@@ -1,26 +1,100 @@
-# Compatibility
+# CuLE — GPU-Accelerated Atari Environments for Reinforcement Learning
 
-This fork is updated for modern software stacks: it compiles with the
-[CUDA 12.x Toolkit](https://developer.nvidia.com/cuda-toolkit) and runs against
-current PyTorch releases. The legacy `gym`/`atari_py` dependencies were replaced
-with [Gymnasium](https://gymnasium.farama.org) and
-[ale-py](https://github.com/Farama-Foundation/Arcade-Learning-Environment)
-(Atari ROMs are bundled with ale-py — no separate ROM installation needed).
-See [CHANGES.md](CHANGES.md) for the complete list of differences from
-upstream [NVlabs/cule](https://github.com/NVlabs/cule), including several
-upstream bug fixes.
+CuLE (CUDA Learning Environment) is a CUDA port of the Atari Learning
+Environment (ALE) created by NVIDIA. It emulates thousands of Atari 2600
+games *directly on the GPU* and renders frames there too, so reinforcement
+learning agents can collect experience massively in parallel without the
+CPU-to-GPU bandwidth bottleneck that limits conventional emulators.
 
-We have tested the following environment.
+This repository is a modernized, maintained fork of
+[NVlabs/cule](https://github.com/NVlabs/cule) (2019). On top of the original
+project it provides:
+
+- **A modern software stack** — builds with CUDA 12.x, runs against current
+  PyTorch releases on Python 3.12, and uses
+  [Gymnasium](https://gymnasium.farama.org) and
+  [ale-py](https://github.com/Farama-Foundation/Arcade-Learning-Environment)
+  (ROMs are bundled with ale-py; no separate ROM installation).
+- **Upstream bug fixes** — 14 games that crashed at construction now work;
+  61 games pass automated health checks *and* per-game behavioral
+  verification against the reference ale-py emulator on both the CPU and GPU
+  backends. See [CHANGES.md](CHANGES.md) for the complete list.
+- **An optimized GPU renderer** — the frame-rendering kernel is now
+  warp-cooperative, raising environment throughput by 34–48% over upstream
+  while remaining bit-exact with the original emulation.
+- **Modern trainers** — [CleanRL](https://github.com/vwxyzjn/cleanrl)-style
+  single-file PPO, DQN, C51, Rainbow, PQN, and discrete-SAC trainers with a
+  CuLE backend, including `torch.compile`/CUDA-graph variants
+  ([cleanrl/](cleanrl/)), alongside the original A2C, V-trace, PPO, and DQN
+  examples ([examples/](examples/)).
+- **Reproducible benchmarks** — the scripts used for every number below live
+  in [benchmarks/](benchmarks/).
+
+# Why CuLE?
+
+All measurements below are from a single machine: RTX 4090, i5-13600K,
+PyTorch 2.13 (cu130), CUDA 12.9. Scripts to reproduce them are in
+[benchmarks/](benchmarks/).
+
+## Raw environment throughput
+
+Breakout, grayscale 84×84, frameskip 4, random actions, no learner. One
+env-step corresponds to four emulated Atari frames:
+
+| Parallel envs | Env-steps/s | Atari frames/s |
+|---:|---:|---:|
+| 256 | 21,177 | ~85k |
+| 1,024 | 74,937 | ~300k |
+| 4,096 | 113,654 | ~455k |
+
+## End-to-end training throughput vs EnvPool
+
+Full compiled-PPO training loop on Breakout (environment stepping, inference,
+advantage computation, backpropagation, and optimizer updates), CuLE vs
+[EnvPool](https://github.com/sail-sg/envpool) 1.2.5:
+
+| Setting | CuLE SPS | EnvPool SPS |
+|---|---:|---:|
+| 256 envs (equal count) | 16,112 | 17,229 |
+| Each backend's best count | **42,464** (at 2,048 envs) | 20,812 (at 512 envs) |
+
+EnvPool, which steps environments on the CPU, is slightly ahead at small
+environment counts. CuLE keeps scaling: at its best batch size it delivers
+**about 2× EnvPool's peak throughput** on this machine, and the gap widens
+with the environment count. The native V-trace example goes further still,
+reaching ~60k SPS at 12,288 environments.
+
+## Does the speed translate into learning?
+
+Paired 10M-transition PPO runs on Breakout — identical hyperparameters for
+both backends within each pair, and all checkpoints evaluated with the same
+64 parallel full-game evaluators:
+
+![Compiled PPO on Breakout: matched CuLE vs EnvPool by training time](media/images/ppo_breakout_cule_vs_envpool.png)
+
+At 512–2,048 environments, CuLE reaches high scores earlier in wall-clock
+training time (e.g. mean reward 600 in ~4 minutes at 1,024–2,048 envs, versus
+~5.5–7 minutes for EnvPool), and the best final score of the experiment
+(682 mean reward) came from CuLE at 2,048 environments. At 256 environments
+the relationship reverses and EnvPool is the better choice. These are
+single-seed runs measured before the renderer optimization landed, so current
+CuLE throughput is higher still.
+
+**Rule of thumb:** if you can batch ≥512 environments, CuLE is the faster
+backend end to end; below that, a CPU vectorizer like EnvPool wins on a
+strong CPU.
+
+# Installation
+
+Tested environment:
 
 |**Operating System** | **Compiler** | **CUDA** | **Python / PyTorch** |
 |-----------------|----------|------|------------------|
 | Ubuntu 22.04 (WSL2) | GCC 11.4 | 12.9 | 3.12 / torch 2.13 (cu130) |
 
-CuLE runs on Maxwell- through Ada/Hopper-architecture NVIDIA GPUs (tested on an
-RTX 4090, sm_89). The build targets the compute capability of the GPUs detected
-at compile time.
-
-# Building CuLE
+CuLE runs on Maxwell- through Ada/Hopper-architecture NVIDIA GPUs (tested on
+an RTX 4090, sm_89). The build targets the compute capability of the GPUs
+detected at compile time.
 
 Clone the repository (with submodules) and pin the `pybind11` submodule to a
 modern release:
@@ -64,13 +138,54 @@ Notes:
 - The unmaintained `agency` submodule needs small fixes for GCC >= 9;
   setup.py applies [third_party/patches/agency-modern-toolchain.patch](third_party/patches/agency-modern-toolchain.patch)
   automatically when it is missing.
+- A Dockerfile with the full build is available at [envs/Dockerfile](envs/Dockerfile)
+  (see the original README below for docker usage).
 
-# Running the examples
+# Using CuLE
 
-All training scripts share the same core flags:
+## As a library
 
-- `--env-name <name>` — legacy Gym-style names (`PongNoFrameskip-v4`) and
-  Gymnasium names (`ALE/Pong-v5`) are both accepted.
+The `torchcule` package exposes batched Atari environments with a
+Gym-like API that returns PyTorch tensors on the selected device:
+
+```python
+from torchcule.atari import Env
+
+env = Env("BreakoutNoFrameskip-v4", num_envs=1024, device="cuda",
+          color_mode="gray", rescale=True, frameskip=4, episodic_life=True)
+obs = env.reset()                      # (1024, 84, 84, 1) uint8, on the GPU
+obs, reward, done, info = env.step(actions)   # actions: (1024,) int tensor
+```
+
+Legacy Gym-style names (`PongNoFrameskip-v4`) and Gymnasium names
+(`ALE/Pong-v5`) are both accepted.
+
+## CleanRL-style trainers
+
+The [cleanrl/](cleanrl/) directory contains single-file trainers for PPO
+(plus a recurrent variant), DQN, C51, Rainbow, PQN, and discrete SAC. All of
+them accept `--env-backend cule`, and PPO/DQN/C51/Rainbow/PQN also have
+`torch.compile` + CUDA-graph variants:
+
+```
+python cleanrl/ppo_atari_envpool_torchcompile.py \
+  --env-backend cule --env-id BreakoutNoFrameskip-v4 \
+  --num-envs 1024 --num-steps 8 --compile --cudagraphs
+
+python cleanrl/dqn_atari.py \
+  --env-backend cule --env-id PongNoFrameskip-v4 \
+  --num-envs 256 --batch-size 512 --replay-ratio 1
+```
+
+See [cleanrl/README_CULE.md](cleanrl/README_CULE.md) for the full list of
+scripts, flags, and per-algorithm throughput numbers.
+
+## Native examples
+
+The original CuLE example trainers live in [examples/](examples/). They share
+the same core flags:
+
+- `--env-name <name>` — the Atari game to train on.
 - `--use-cuda-env` — emulate the Atari environments on the GPU. Omit it to use
   the CuLE CPU backend, or pass `--use-openai` to generate training data with
   the reference gymnasium/ale-py emulator.
@@ -78,18 +193,13 @@ All training scripts share the same core flags:
   with `--use-cuda-env`.
 - `--evaluation-interval N` — frames between evaluations. Each evaluation plays
   10 full episodes on the CPU, so a small interval makes evaluation — not
-  training — dominate wall-clock time. The `training time` printed with the
-  evaluation results counts only time spent in training updates.
+  training — dominate wall-clock time.
 
 **A2C + V-trace** (best throughput; from `examples/vtrace`):
 
 ```
 python vtrace_main.py --env-name PongNoFrameskip-v4 --normalize --use-cuda-env --num-ales 1200 --num-steps 20 --num-steps-per-update 1 --num-minibatches 20 --t-max 8000000 --evaluation-interval 2000000
 ```
-
-Add `--double-test` to additionally evaluate on the reference gymnasium
-emulator at every evaluation (doubles evaluation cost; useful to cross-check
-CuLE's emulation).
 
 **A2C** (from `examples/a2c`):
 
@@ -115,7 +225,7 @@ python dqn_main.py --env-name SeaquestNoFrameskip-v4 --use-cuda-env --num-ales 3
 python animate.py --env-name BreakoutNoFrameskip-v4 --use-cuda --num-envs 16
 ```
 
-### Supported games
+## Supported games
 
 Any of the following can be passed to `--env-name`, either as
 `<CamelCaseName>NoFrameskip-v4` / `ALE/<CamelCaseName>-v5` or as the plain
@@ -159,52 +269,24 @@ elevator_action   (no rewards on the CPU backend, implausible ones on GPU)
 Other ale-py roms load as well, but without game-specific reward/lives
 decoding they are not useful for training.
 
-# Performance notes
+## Practical performance tips
 
-Measured on an RTX 4090 with the README vtrace configuration (1200 envs,
-Pong): ~66k agent steps/s raw environment throughput, ~36k FPS inference,
-~30k FPS full training.
-
-- **Where the time goes**: the policy network is tiny, so training throughput
-  is dominated by the environment dispatch (CuLE synchronizes the device
-  after every kernel), the rollout-buffer copies, and Python overhead — not
-  by the model. Evaluation episodes run on the CPU and dominate *wall-clock*
-  time when `--evaluation-interval` is small.
-- **`torch.compile` does not help here** (measured: 10–45% *slower* end to
-  end, both with and without `--normalize`). The convnet is too small a
-  fraction of the loop to win anything, and dynamo guard overhead plus
-  graph breaks in the running-normalization path cost more than the fused
-  kernels save. The `--torch-compile` flag exists so you can re-measure on
-  your own hardware.
-- **What actually helps**: larger `--num-ales` (up to GPU memory), a larger
-  `--evaluation-interval`, and `--num-steps-per-update` > 1 (reuses each
-  rollout for more updates at some sample-efficiency cost).
-
-## Throughput search
-
-`examples/benchmark_search.py` runs resumable full-training throughput sweeps
-for A2C, PPO, and V-trace.  It excludes evaluation and file I/O, warms up each
-configuration, and appends every result (including failures) to JSONL:
-
-```
-conda run -n cule312 python examples/benchmark_search.py \
-  --profile quick --output benchmark_results/quick.jsonl
-```
-
-Use `--profile full` for a wider sweep, or target a region explicitly:
-
-```
-conda run -n cule312 python examples/benchmark_search.py \
-  --algorithms a2c vtrace --env-counts 2000 2400 2800 3200 \
-  --rollout-steps 5 --normalization both --repeats 3 \
-  --output benchmark_results/refinement.jsonl
-```
-
-The reported FPS includes environment stepping, policy inference, return/loss
-calculation, backpropagation, and optimizer updates.  Changing PPO epochs,
-V-trace minibatches, or update frequency changes the learning workload, so
-compare such results with those settings visible rather than as equivalent
-training runs.
+- **Batch big.** CuLE's advantage comes from parallelism: throughput keeps
+  scaling into the thousands of environments, while CPU vectorizers plateau
+  early. Below ~512 environments, prefer a CPU backend.
+- **The environment loop, not the model, is the bottleneck** for the small
+  Atari convnets — larger `--num-ales`/`--num-envs`, a larger evaluation
+  interval, and reusing rollouts for more updates help more than model-side
+  tricks.
+- **Maximum SPS is not the objective.** In a fixed-budget Breakout
+  comparison, the highest-throughput configuration (V-trace at ~24k SPS)
+  learned the least, while compiled PPO and DQN produced the best policies.
+  Pick configurations by reward versus wall-clock, not by SPS alone.
+- The [benchmarks/](benchmarks/) folder contains resumable throughput sweeps
+  (`benchmark_step_throughput.py`, `benchmark_cule_envpool.py`,
+  `benchmark_implementations.py`) and fixed-budget learning comparisons
+  (`benchmark_learning.py`, `run_ppo_breakout_paired_10m.py`) to re-measure
+  all of the above on your own hardware.
 
 # Testing
 
@@ -220,6 +302,12 @@ pytest -m slow      # end-to-end training micro-runs for a2c/vtrace/ppo/dqn
 ```
 
 ---
+
+# Original README
+
+*The remainder of this file is the original README from
+[NVlabs/cule](https://github.com/NVlabs/cule) (July 2019), lightly updated
+where the original instructions no longer work on modern stacks.*
 
 ![ALT](/media/images/System.png "Deep RL System Overview")
 

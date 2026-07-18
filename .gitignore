@@ -8,6 +8,7 @@ __pycache__
 # media files
 *.png
 *.mov
+!media/images/*.png
 
 # build file
 build
@@ -21,6 +22,9 @@ dist
 *.csv
 examples/*/runs
 /runs/
+
+# local benchmark results and artifacts
+benchmark_results/
 
 # editor/IDE
 .vscode/
