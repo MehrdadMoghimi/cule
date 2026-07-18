@@ -38,9 +38,38 @@ conda run -n cule312 python cleanrl/ppo_atari_envpool_torchcompile.py \
   --env-id PongNoFrameskip-v4 --compile
 ```
 
-The `torchcompile` DQN uses TorchRL's replay buffer. This checkout pins
-TorchRL 0.13.2, the current stable release, in both `requirements.txt` and the
-conda environment definition.
+PQN, C51, and Rainbow also have paired torch.compile entry points. Omitting
+the --compile flag runs the same implementation eagerly, which makes a matched
+throughput comparison straightforward. The PPO, DQN, PQN, and Rainbow variants
+additionally accept `--cudagraphs`, which captures the fixed-shape policy and
+learner update with tensordict's `CudaGraphModule` (combinable with
+`--compile`; PER sampling, priority-tree writes, and CuLE stepping stay
+outside the capture):
+
+~~~bash
+conda run -n cule312 python cleanrl/pqn_atari_envpool_torchcompile.py \
+  --env-backend cule --env-id PongNoFrameskip-v4 \
+  --num-envs 256 --num-steps 32 --compile
+
+conda run -n cule312 python cleanrl/c51_atari_torchcompile.py \
+  --env-backend cule --env-id PongNoFrameskip-v4 \
+  --num-envs 256 --batch-size 512 --replay-ratio 1 --compile
+
+conda run -n cule312 python cleanrl/rainbow_atari_torchcompile.py \
+  --env-backend cule --env-id PongNoFrameskip-v4 \
+  --num-envs 256 --batch-size 512 --replay-ratio 1 --compile
+~~~
+
+The scripts used to benchmark these trainers (throughput sweeps, CuLE vs
+EnvPool comparisons, and fixed-budget learning runs) live in
+[benchmarks/](../benchmarks/); headline results are summarized in the
+[project README](../README.md).
+
+The `torchcompile` DQN, C51, and Rainbow variants use TorchRL's GPU-resident
+`LazyTensorStorage` replay. Rainbow retains prioritized replay with a CUDA
+sum/min tree; the installed TorchRL wheel's native prioritized-replay extension
+is not compatible with this PyTorch build. This checkout pins TorchRL 0.13.2 in
+both `requirements.txt` and the conda environment definition.
 
 All bundled algorithms support vectorized CuLE collection. `--cule-device auto`
 uses the training GPU for 32 or more environments and the CPU for smaller
@@ -64,21 +93,29 @@ Use `--max-training-seconds` for equal-wall-clock comparisons and
 SPS, learner updates/s, effective update-to-data ratio, replay ratio, and moving
 episodic return.
 
-The off-policy trainers use frame-efficient replay. Only one 84x84 `uint8`
-frame is stored per transition; four-frame observations are reconstructed when
-sampled without crossing episode boundaries. A one-million-transition replay
-therefore uses about 7.1 GB for frames instead of roughly 28 GB for stored
-four-frame observations, or 56 GB when both current and next stacks are stored.
-Rainbow additionally uses vectorized prioritized replay and independent n-step
-trajectories for every environment.
+The regular off-policy trainers use frame-efficient replay. Only one 84x84
+`uint8` frame is stored per transition; four-frame observations are reconstructed
+when sampled without crossing episode boundaries. A one-million-transition
+replay therefore uses about 7.1 GB for frames instead of roughly 28 GB for
+stored four-frame observations, or 56 GB when both current and next stacks are
+stored. The TorchRL-backed torchcompile DQN, C51, and Rainbow variants instead
+store full current and next stacks on the training GPU to remove replay
+host-to-device transfers (about 5.3 GB for 100,000 `uint8` transitions before
+model and allocator overhead). Rainbow additionally uses vectorized prioritized
+replay and independent n-step trajectories for every environment.
 
 ## RTX 4090 throughput snapshot
 
-Measured on 2026-07-13 with PyTorch 2.13.0+cu130. `SPS` is full training-loop
-throughput, including environment interaction, inference, loss computation,
+Measured with PyTorch 2.13.0+cu130. `SPS` is full training-loop throughput,
+including environment interaction, inference, loss computation,
 backpropagation, and optimizer updates. Compare backends within a row; the
 algorithms use different update workloads, so cross-row ranking is not a
 learning-efficiency comparison.
+
+> The CuLE rows below were measured before the warp-cooperative frame
+> renderer, which raises CuLE throughput a further 24-48% depending on the
+> workload (re-measured compiled PPO: 16,112 SPS at 256 envs, up from
+> 12,301). Rerun `benchmarks/benchmark_cule_envpool.py` for current numbers.
 
 | Algorithm | Backend | Workload | Final SPS |
 |---|---|---:|---:|

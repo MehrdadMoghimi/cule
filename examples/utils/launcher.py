@@ -26,6 +26,10 @@ def add_global_parser_options(parser):
     parser.add_argument('--episodic-life', action='store_true', default=False, help='use end of life as end of episode')
     parser.add_argument('--evaluation-interval', type=int, default=int(1e6), help='Number of frames between evaluations (default: 1,000,000)')
     parser.add_argument('--evaluation-episodes', type=int, default=10, help='Number of evaluation episodes to average over (default: 10)')
+    parser.add_argument('--evaluation-deterministic', action='store_true', default=False,
+                        help='Use greedy actions during evaluation instead of sampling')
+    parser.add_argument('--evaluation-seed', type=int, default=10000,
+                        help='First seed in the fixed evaluation seed set (default: 10000)')
     parser.add_argument('--gamma', type=float, default=0.99, help='discount factor for rewards (default: 0.99)')
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID (default: None)')
     parser.add_argument('--local_rank', type=int, default=0)

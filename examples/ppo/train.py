@@ -41,6 +41,8 @@ class data_prefetcher():
 def worker(gpu, ngpus_per_node, args):
     solution_wall_start = time.time()
     env_device, train_device = args_initialize(gpu, ngpus_per_node, args)
+    if train_device.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats()
     train_csv_file, train_csv_writer, eval_csv_file, eval_csv_writer, summary_writer = log_initialize(args, train_device)
     train_env, test_env, observation = env_initialize(args, env_device)
 
@@ -264,7 +266,10 @@ def worker(gpu, ngpus_per_node, args):
                     result = {'algorithm': 'ppo',
                               'fps': measured * args.world_size * num_frames_per_iter / benchmark_time,
                               'seconds': benchmark_time,
-                              'measured_iterations': measured}
+                              'measured_iterations': measured,
+                              'num_envs': args.num_ales,
+                              'num_steps': args.num_steps,
+                              'peak_cuda_memory_mb': torch.cuda.max_memory_allocated() / (1024 ** 2)}
                     print('THROUGHPUT_RESULT ' + json.dumps(result, sort_keys=True), flush=True)
                     break
 

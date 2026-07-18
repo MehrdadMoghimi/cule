@@ -93,6 +93,8 @@ def worker(gpu, ngpus_per_node, args):
 
     env_device = torch.device('cuda', args.gpu) if args.use_cuda_env else torch.device('cpu')
     train_device = torch.device('cuda', args.gpu) if (args.no_cuda_train == False) else torch.device('cpu')
+    if train_device.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats()
 
     # Setup
     np.random.seed(args.seed)
@@ -120,9 +122,9 @@ def worker(gpu, ngpus_per_node, args):
         print('Initializing evaluation memory with {} entries...'.format(args.evaluation_size), end='', flush=True)
         start_time = time.time()
 
-    val_mem = initialize_validation(args, train_device)
+    val_mem = None if args.throughput_benchmark else initialize_validation(args, train_device)
 
-    if args.rank == 0:
+    if args.rank == 0 and not args.throughput_benchmark:
         print('complete ({})'.format(format_time(time.time() - start_time)), flush=True)
 
     if args.evaluate:
@@ -199,6 +201,8 @@ def worker(gpu, ngpus_per_node, args):
 
         num_frames_per_iter = args.num_ales
         total_steps = math.ceil(args.t_max / (args.world_size * num_frames_per_iter))
+        if args.throughput_benchmark:
+            total_steps = args.benchmark_warmup_iterations + args.benchmark_measure_iterations
         epsilons = np.linspace(args.epsilon_start, args.epsilon_final, math.ceil(args.epsilon_frames / num_frames_per_iter))
         epsilon_offset = math.ceil(args.learn_start / num_frames_per_iter)
 
@@ -209,15 +213,24 @@ def worker(gpu, ngpus_per_node, args):
         target_update_offset = 0
 
         total_time = 0
+        learner_updates = 0
+        benchmark_start = None
+        benchmark_start_step = None
+        benchmark_start_updates = None
 
         # main loop
         iterator = range(total_steps)
         if args.rank == 0:
-            iterator = tqdm(iterator)
+            iterator = tqdm(iterator, disable=args.throughput_benchmark or args.no_progress)
 
         for update in iterator:
 
             T = args.world_size * update * num_frames_per_iter
+            if args.throughput_benchmark and update == args.benchmark_warmup_iterations:
+                torch.cuda.synchronize(train_device)
+                benchmark_start = time.perf_counter()
+                benchmark_start_step = T
+                benchmark_start_updates = learner_updates
             epsilon = epsilons[min(update - epsilon_offset, len(epsilons) - 1)] if T >= args.learn_start else epsilons[0]
             start_time = time.time()
 
@@ -299,6 +312,7 @@ def worker(gpu, ngpus_per_node, args):
                     nvtx.range_pop()
 
                     avg_loss += loss.mean().item()
+                learner_updates += num_minibatches
                 avg_loss /= num_minibatches
 
                 # Update target network
@@ -312,13 +326,37 @@ def worker(gpu, ngpus_per_node, args):
 
             total_time += time.time() - start_time
 
+            if (
+                args.throughput_benchmark
+                and update + 1 == args.benchmark_warmup_iterations + args.benchmark_measure_iterations
+            ):
+                torch.cuda.synchronize(train_device)
+                benchmark_end = time.perf_counter()
+                measured_steps = (update + 1) * num_frames_per_iter - benchmark_start_step
+                measured_updates = learner_updates - benchmark_start_updates
+                measured_seconds = benchmark_end - benchmark_start
+                result = {
+                    'algorithm': 'dqn',
+                    'batch_size': args.batch_size,
+                    'fps': measured_steps / measured_seconds,
+                    'learner_updates': measured_updates,
+                    'measured_iterations': args.benchmark_measure_iterations,
+                    'num_envs': args.num_ales,
+                    'peak_cuda_memory_mb': torch.cuda.max_memory_allocated() / (1024 ** 2),
+                    'replay_ratio': measured_updates * args.batch_size / measured_steps,
+                    'seconds': measured_seconds,
+                    'ups': measured_updates / measured_seconds,
+                }
+                print('THROUGHPUT_RESULT ' + json.dumps(result, sort_keys=True), flush=True)
+                break
+
             if args.rank == 0:
                 if args.plot and ((update % args.replay_frequency) == 0):
                     writer.add_scalar('train/epsilon', epsilon, T)
                     writer.add_scalar('train/rewards', final_rewards.mean(), T)
                     writer.add_scalar('train/lengths', final_lengths.mean(), T)
 
-                if T >= eval_offset:
+                if (not args.throughput_benchmark) and T >= eval_offset:
                     eval_start_time = time.time()
                     dqn.eval()  # Set DQN (online network) to evaluation mode
                     rewards, lengths, avg_Q = test(args, T, dqn, val_mem, test_env, train_device)

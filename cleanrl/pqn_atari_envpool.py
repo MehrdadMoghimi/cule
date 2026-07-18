@@ -1,4 +1,5 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/pqn/#pqn_atari_envpoolpy
+import json
 import os
 import random
 import sys
@@ -74,6 +75,13 @@ class Args:
     """the fraction of `total_timesteps` it takes from start_e to end_e"""
     q_lambda: float = 0.65
     """the lambda for the Q-Learning algorithm"""
+
+    benchmark: bool = False
+    """run a fixed warmup/measurement window and print a JSON benchmark result"""
+    benchmark_warmup_iterations: int = 3
+    """full training iterations excluded from benchmark timing"""
+    benchmark_measure_iterations: int = 10
+    """full training iterations included in benchmark timing"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -158,10 +166,25 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 
 
 if __name__ == "__main__":
+    process_start = time.perf_counter()
     args = tyro.cli(Args)
+    if args.num_envs < 1:
+        raise ValueError("num_envs must be positive")
+    if args.num_steps < 1:
+        raise ValueError("num_steps must be positive")
+    if args.num_minibatches < 1:
+        raise ValueError("num_minibatches must be positive")
+    if args.benchmark_warmup_iterations < 0:
+        raise ValueError("benchmark_warmup_iterations cannot be negative")
+    if args.benchmark_measure_iterations < 1:
+        raise ValueError("benchmark_measure_iterations must be positive")
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
+    if args.minibatch_size < 1:
+        raise ValueError("num_minibatches cannot exceed num_envs * num_steps")
     args.num_iterations = args.total_timesteps // args.batch_size
+    if args.benchmark:
+        args.num_iterations = args.benchmark_warmup_iterations + args.benchmark_measure_iterations
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -175,11 +198,12 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
+    writer = None if args.benchmark else SummaryWriter(f"runs/{run_name}")
+    if writer is not None:
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        )
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -188,6 +212,8 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     # env setup
     if args.env_backend == "cule":
@@ -222,12 +248,20 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
+    benchmark_start = None
+    benchmark_start_step = None
     reset_result = envs.reset()
     reset_obs = reset_result[0] if isinstance(reset_result, tuple) else reset_result
     next_obs = to_tensor(reset_obs, device)
     next_done = torch.zeros(args.num_envs).to(device)
 
     for iteration in range(1, args.num_iterations + 1):
+        if args.benchmark and iteration == args.benchmark_warmup_iterations + 1:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            benchmark_start = time.perf_counter()
+            benchmark_start_step = global_step
+
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -270,19 +304,23 @@ if __name__ == "__main__":
                 for final_info in info["final_info"]:
                     if final_info and "episode" in final_info:
                         episode_return = final_info["episode"]["r"]
-                        print(f"global_step={global_step}, episodic_return={episode_return}")
+                        if not args.benchmark:
+                            print(f"global_step={global_step}, episodic_return={episode_return}")
                         avg_returns.append(episode_return)
-                        writer.add_scalar("charts/avg_episodic_return", np.average(avg_returns), global_step)
-                        writer.add_scalar("charts/episodic_return", episode_return, global_step)
-                        writer.add_scalar("charts/episodic_length", final_info["episode"]["l"], global_step)
+                        if writer is not None:
+                            writer.add_scalar("charts/avg_episodic_return", np.average(avg_returns), global_step)
+                            writer.add_scalar("charts/episodic_return", episode_return, global_step)
+                            writer.add_scalar("charts/episodic_length", final_info["episode"]["l"], global_step)
             elif "r" in info:
                 game_overs = logging_dones & (info["lives"] == 0)
                 for idx in np.flatnonzero(game_overs):
-                    print(f"global_step={global_step}, episodic_return={info['r'][idx]}")
+                    if not args.benchmark:
+                        print(f"global_step={global_step}, episodic_return={info['r'][idx]}")
                     avg_returns.append(info["r"][idx])
-                    writer.add_scalar("charts/avg_episodic_return", np.average(avg_returns), global_step)
-                    writer.add_scalar("charts/episodic_return", info["r"][idx], global_step)
-                    writer.add_scalar("charts/episodic_length", info["l"][idx], global_step)
+                    if writer is not None:
+                        writer.add_scalar("charts/avg_episodic_return", np.average(avg_returns), global_step)
+                        writer.add_scalar("charts/episodic_return", info["r"][idx], global_step)
+                        writer.add_scalar("charts/episodic_length", info["l"][idx], global_step)
 
         # Compute Q(lambda) targets
         with torch.no_grad():
@@ -322,10 +360,43 @@ if __name__ == "__main__":
                 nn.utils.clip_grad_norm_(q_network.parameters(), args.max_grad_norm)
                 optimizer.step()
 
-        writer.add_scalar("losses/td_loss", loss, global_step)
-        writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        if writer is not None:
+            writer.add_scalar("losses/td_loss", loss, global_step)
+            writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
+            print("SPS:", int(global_step / (time.time() - start_time)))
+            writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+    if args.benchmark:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        benchmark_end = time.perf_counter()
+        measured_steps = global_step - benchmark_start_step
+        measured_seconds = benchmark_end - benchmark_start
+        result = {
+            "algorithm": "pqn",
+            "backend": args.env_backend,
+            "batch_size": args.batch_size,
+            "benchmark": "full_training_loop",
+            "compile": False,
+            "env_device": str(getattr(envs, "device", "cpu")),
+            "env_id": args.env_id,
+            "measure_iterations": args.benchmark_measure_iterations,
+            "measured_seconds": measured_seconds,
+            "measured_steps": measured_steps,
+            "num_envs": args.num_envs,
+            "num_minibatches": args.num_minibatches,
+            "num_steps": args.num_steps,
+            "peak_cuda_memory_mb": (
+                torch.cuda.max_memory_allocated(device) / (1024**2) if device.type == "cuda" else 0.0
+            ),
+            "process_seconds": benchmark_end - process_start,
+            "schema_version": 1,
+            "sps": measured_steps / measured_seconds,
+            "update_epochs": args.update_epochs,
+            "warmup_iterations": args.benchmark_warmup_iterations,
+        }
+        print(f"BENCHMARK_RESULT {json.dumps(result, sort_keys=True)}", flush=True)
 
     envs.close()
-    writer.close()
+    if writer is not None:
+        writer.close()

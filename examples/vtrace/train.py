@@ -19,6 +19,8 @@ from a2c.test import test
 def worker(gpu, ngpus_per_node, args):
     solution_wall_start = time.time()
     env_device, train_device = args_initialize(gpu, ngpus_per_node, args)
+    if train_device.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats()
 
     # benchmark?
     if args.benchmark:
@@ -379,6 +381,17 @@ def worker(gpu, ngpus_per_node, args):
 
                 csv_writer.writerow([args.env_name, args.num_ales, elapsed_time / benchmark_steps, fps, backend_name, 'training'])
                 print('Benchmark - training: ' + str(round(fps)) + ' PFS')
+                result = {
+                    'algorithm': 'vtrace',
+                    'fps': fps,
+                    'measured_iterations': benchmark_steps,
+                    'num_envs': args.num_ales,
+                    'num_steps': args.num_steps,
+                    'num_steps_per_update': args.num_steps_per_update,
+                    'peak_cuda_memory_mb': torch.cuda.max_memory_allocated() / (1024 ** 2),
+                    'seconds': elapsed_time,
+                }
+                print('THROUGHPUT_RESULT ' + json.dumps(result, sort_keys=True), flush=True)
 
                 csv_file.close()
                 break

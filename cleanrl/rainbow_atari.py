@@ -1,4 +1,5 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/rainbow/#rainbow_ataripy
+import json
 import math
 import os
 import random
@@ -117,6 +118,12 @@ class Args:
     """the return lower bound"""
     v_max: float = 10
     """the return upper bound"""
+    benchmark: bool = False
+    """run a fixed warmup/measurement window and print a JSON benchmark result"""
+    benchmark_warmup_iterations: int = 10
+    """vector-environment steps excluded from benchmark timing"""
+    benchmark_measure_iterations: int = 30
+    """vector-environment steps included in benchmark timing"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -228,6 +235,7 @@ class NoisyDuelingDistributionalNetwork(nn.Module):
 
 
 if __name__ == "__main__":
+    process_start = time.perf_counter()
     args = tyro.cli(Args)
     if args.learner_updates_per_vector_step < 0:
         raise ValueError("learner_updates_per_vector_step must be non-negative")
@@ -239,6 +247,10 @@ if __name__ == "__main__":
         raise ValueError("max_training_seconds must be non-negative")
     if args.num_envs < 1:
         raise ValueError("num_envs must be positive")
+    if args.benchmark_warmup_iterations < 0:
+        raise ValueError("benchmark_warmup_iterations cannot be negative")
+    if args.benchmark_measure_iterations < 1:
+        raise ValueError("benchmark_measure_iterations must be positive")
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -252,11 +264,12 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
+    writer = None if args.benchmark else SummaryWriter(f"runs/{run_name}")
+    if writer is not None:
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        )
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -265,6 +278,8 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     # env setup
     if args.env_backend == "cule":
@@ -308,7 +323,18 @@ if __name__ == "__main__":
     next_target_update = args.target_network_frequency
     next_log_step = max(10000, args.num_envs)
     num_vector_steps = int(np.ceil(args.total_timesteps / args.num_envs))
-    for _ in range(num_vector_steps):
+    if args.benchmark:
+        num_vector_steps = args.benchmark_warmup_iterations + args.benchmark_measure_iterations
+    benchmark_start = None
+    benchmark_start_step = None
+    benchmark_start_updates = None
+    for vector_step in range(num_vector_steps):
+        if args.benchmark and vector_step == args.benchmark_warmup_iterations:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            benchmark_start = time.perf_counter()
+            benchmark_start_step = global_step
+            benchmark_start_updates = learner_updates
         if args.max_training_seconds and time.time() - start_time >= args.max_training_seconds:
             break
         previous_global_step = global_step
@@ -332,7 +358,9 @@ if __name__ == "__main__":
         transition_dones = done_tensor(terminations, truncations, device).bool()
         global_step += args.num_envs
 
-        solved = episode_stats.update(infos, global_step, writer)
+        solved = False
+        if not args.benchmark:
+            solved = episode_stats.update(infos, global_step, writer)
 
         rb.add(next_obs, actions, rewards, transition_dones)
 
@@ -412,7 +440,7 @@ if __name__ == "__main__":
                     learner_updates // args.target_network_frequency + 1
                 ) * args.target_network_frequency
 
-            if global_step >= next_log_step and num_updates:
+            if not args.benchmark and global_step >= next_log_step and num_updates:
                 q_values = (pred_dist * q_network.support).sum(dim=1)
                 sps = int(global_step / (time.time() - start_time))
                 writer.add_scalar("losses/td_loss", loss.item(), global_step)
@@ -435,16 +463,54 @@ if __name__ == "__main__":
         if solved:
             break
 
-    elapsed = time.time() - start_time
-    print("SPS:", int(global_step / elapsed))
-    print("learner updates:", learner_updates)
-    print("UPS:", learner_updates / elapsed)
-    print("effective UTD:", learner_updates / max(global_step - args.learning_starts, 1))
-    print(
-        "replay ratio:",
-        learner_updates * args.batch_size / max(global_step - args.learning_starts, 1),
-    )
-    episode_stats.print_summary()
+    if args.benchmark:
+        if benchmark_start is None or benchmark_start_step is None or benchmark_start_updates is None:
+            raise RuntimeError("benchmark measurement window did not start")
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        benchmark_end = time.perf_counter()
+        measured_steps = global_step - benchmark_start_step
+        measured_updates = learner_updates - benchmark_start_updates
+        measured_seconds = benchmark_end - benchmark_start
+        result = {
+            "algorithm": "rainbow",
+            "backend": args.env_backend,
+            "batch_size": args.batch_size,
+            "benchmark": "full_training_loop",
+            "compile": False,
+            "env_device": str(getattr(envs, "device", "cpu")),
+            "env_id": args.env_id,
+            "implementation": "original",
+            "learner_updates": measured_updates,
+            "measure_iterations": args.benchmark_measure_iterations,
+            "measured_seconds": measured_seconds,
+            "measured_steps": measured_steps,
+            "n_step": args.n_step,
+            "num_envs": args.num_envs,
+            "peak_cuda_memory_mb": (
+                torch.cuda.max_memory_allocated(device) / (1024**2) if device.type == "cuda" else 0.0
+            ),
+            "process_seconds": benchmark_end - process_start,
+            "replay_backend": "numpy_frame_efficient_per",
+            "replay_ratio": measured_updates * args.batch_size / max(measured_steps, 1),
+            "schema_version": 1,
+            "sps": measured_steps / measured_seconds,
+            "ups": measured_updates / measured_seconds,
+            "warmup_iterations": args.benchmark_warmup_iterations,
+        }
+        print(f"BENCHMARK_RESULT {json.dumps(result, sort_keys=True)}", flush=True)
+    else:
+        elapsed = time.time() - start_time
+        print("SPS:", int(global_step / elapsed))
+        print("learner updates:", learner_updates)
+        print("UPS:", learner_updates / elapsed)
+        print("effective UTD:", learner_updates / max(global_step - args.learning_starts, 1))
+        print(
+            "replay ratio:",
+            learner_updates * args.batch_size / max(global_step - args.learning_starts, 1),
+        )
+        episode_stats.print_summary()
 
     envs.close()
-    writer.close()
+    if writer is not None:
+        writer.close()

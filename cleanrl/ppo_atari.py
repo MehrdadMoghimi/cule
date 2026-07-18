@@ -1,4 +1,5 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
+import json
 import os
 import random
 import sys
@@ -92,6 +93,13 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
+    benchmark: bool = False
+    """run a fixed warmup/measurement window and print a JSON benchmark result"""
+    benchmark_warmup_iterations: int = 3
+    """full training iterations excluded from benchmark timing"""
+    benchmark_measure_iterations: int = 10
+    """full training iterations included in benchmark timing"""
+
 
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
@@ -151,10 +159,25 @@ class Agent(nn.Module):
 
 
 if __name__ == "__main__":
+    process_start = time.perf_counter()
     args = tyro.cli(Args)
+    if args.num_envs < 1:
+        raise ValueError("num_envs must be positive")
+    if args.num_steps < 1:
+        raise ValueError("num_steps must be positive")
+    if args.num_minibatches < 1:
+        raise ValueError("num_minibatches must be positive")
+    if args.benchmark_warmup_iterations < 0:
+        raise ValueError("benchmark_warmup_iterations cannot be negative")
+    if args.benchmark_measure_iterations < 1:
+        raise ValueError("benchmark_measure_iterations must be positive")
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
+    if args.minibatch_size < 1:
+        raise ValueError("num_minibatches cannot exceed num_envs * num_steps")
     args.num_iterations = args.total_timesteps // args.batch_size
+    if args.benchmark:
+        args.num_iterations = args.benchmark_warmup_iterations + args.benchmark_measure_iterations
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -168,11 +191,12 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
+    writer = None if args.benchmark else SummaryWriter(f"runs/{run_name}")
+    if writer is not None:
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        )
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -181,6 +205,8 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     # env setup
     if args.env_backend == "cule":
@@ -210,8 +236,15 @@ if __name__ == "__main__":
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = to_tensor(next_obs, device)
     next_done = torch.zeros(args.num_envs).to(device)
+    benchmark_start = None
+    benchmark_start_step = None
 
     for iteration in range(1, args.num_iterations + 1):
+        if args.benchmark and iteration == args.benchmark_warmup_iterations + 1:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            benchmark_start = time.perf_counter()
+            benchmark_start_step = global_step
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -239,9 +272,11 @@ if __name__ == "__main__":
             if "final_info" in infos:
                 for info in infos["final_info"]:
                     if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                        writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                        if not args.benchmark:
+                            print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                        if writer is not None:
+                            writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                            writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -321,21 +356,53 @@ if __name__ == "__main__":
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
 
-        y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
-        var_y = np.var(y_true)
-        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+        if writer is not None:
+            y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
+            var_y = np.var(y_true)
+            explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
-        writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-        writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+            # TRY NOT TO MODIFY: record rewards for plotting purposes
+            writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+            writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
+            writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+            writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
+            writer.add_scalar("losses/explained_variance", explained_var, global_step)
+            print("SPS:", int(global_step / (time.time() - start_time)))
+            writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+    if args.benchmark:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        benchmark_end = time.perf_counter()
+        measured_steps = global_step - benchmark_start_step
+        measured_seconds = benchmark_end - benchmark_start
+        result = {
+            "algorithm": "ppo",
+            "backend": args.env_backend,
+            "batch_size": args.batch_size,
+            "benchmark": "full_training_loop",
+            "compile": False,
+            "env_id": args.env_id,
+            "measure_iterations": args.benchmark_measure_iterations,
+            "measured_seconds": measured_seconds,
+            "measured_steps": measured_steps,
+            "num_envs": args.num_envs,
+            "num_minibatches": args.num_minibatches,
+            "num_steps": args.num_steps,
+            "peak_cuda_memory_mb": (
+                torch.cuda.max_memory_allocated(device) / (1024**2) if device.type == "cuda" else 0.0
+            ),
+            "process_seconds": benchmark_end - process_start,
+            "schema_version": 1,
+            "sps": measured_steps / measured_seconds,
+            "update_epochs": args.update_epochs,
+            "warmup_iterations": args.benchmark_warmup_iterations,
+        }
+        print(f"BENCHMARK_RESULT {json.dumps(result, sort_keys=True)}", flush=True)
 
     envs.close()
-    writer.close()
+    if writer is not None:
+        writer.close()

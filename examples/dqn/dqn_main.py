@@ -65,6 +65,14 @@ def add_parser_options(parser):
     parser.add_argument('--verbose', action='store_true', default=False, help='Enable verbose logging')
     parser.add_argument('--log-dir', default='runs', type=str, help='tensorboardX log directory (default: runs)')
     parser.add_argument('--plot', action='store_true', default=False, help='Enable plotting with tensorboardX')
+    parser.add_argument('--throughput-benchmark', action='store_true', default=False,
+                        help='Skip evaluation and emit a machine-readable full-training throughput result')
+    parser.add_argument('--benchmark-warmup-iterations', type=int, default=10,
+                        help='Vector steps excluded from throughput timing (default: 10)')
+    parser.add_argument('--benchmark-measure-iterations', type=int, default=30,
+                        help='Vector steps included in throughput timing (default: 30)')
+    parser.add_argument('--no-progress', action='store_true', default=False,
+                        help='Disable tqdm progress output')
     parser.add_argument('--multiprocessing-distributed', action='store_true',
                         help='Use multi-processing distributed training to launch '
                              'N processes per node, which has N GPUs. This is the '

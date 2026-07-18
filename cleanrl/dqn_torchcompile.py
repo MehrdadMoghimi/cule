@@ -1,4 +1,6 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/dqn/#dqn_ataripy
+import csv
+import json
 import math
 import os
 import random
@@ -33,6 +35,7 @@ from cule_env import (
     step_env,
     to_tensor,
 )
+from cleanrl_utils.atari_eval import evaluate_cule_policy
 
 from cleanrl_utils.atari_wrappers import (  # isort:skip
     ClipRewardEnv,
@@ -100,6 +103,23 @@ class Args:
     """whether to use torch.compile"""
     cudagraphs: bool = False
     """whether to use CUDA graphs on top of compile"""
+    benchmark: bool = False
+    """run a fixed warmup/measurement window and print a JSON benchmark result"""
+    benchmark_warmup_iterations: int = 10
+    """vector environment steps excluded from benchmark timing"""
+    benchmark_measure_iterations: int = 30
+    """vector environment steps included in benchmark timing"""
+
+    evaluation_interval: int = 1000000
+    """policy transitions between deterministic full-game evaluations"""
+    evaluation_episodes: int = 10
+    """complete unclipped games per evaluation"""
+    evaluation_seed: int = 10000
+    """first seed in the fixed evaluation seed set"""
+    evaluation_max_episode_steps: int = 18000
+    """maximum frame-skipped steps per evaluation game"""
+    learning_curve_path: str | None = None
+    """optional CSV path for full-game evaluation results"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -156,6 +176,7 @@ def linear_schedule(start_e: float, end_e: float, duration: float, t: int) -> fl
 
 
 if __name__ == "__main__":
+    process_start = time.perf_counter()
     args = tyro.cli(Args)
     if args.num_envs < 1:
         raise ValueError("num_envs must be positive")
@@ -169,6 +190,12 @@ if __name__ == "__main__":
         raise ValueError("exploration_fraction must be positive")
     if args.learner_updates_per_vector_step < 0:
         raise ValueError("learner_updates_per_vector_step must be non-negative")
+    if args.benchmark_warmup_iterations < 0:
+        raise ValueError("benchmark_warmup_iterations cannot be negative")
+    if args.benchmark_measure_iterations < 1:
+        raise ValueError("benchmark_measure_iterations must be positive")
+    if args.learning_curve_path and args.evaluation_interval < 1:
+        raise ValueError("evaluation_interval must be positive when learning_curve_path is set")
     if args.replay_ratio is not None:
         if args.replay_ratio < 0:
             raise ValueError("replay_ratio must be non-negative")
@@ -191,6 +218,8 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.cuda else "cpu")
     if args.cudagraphs and device.type != "cuda":
         raise ValueError("cudagraphs requires CUDA")
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
 
     if args.env_backend == "cule":
         env_device = resolve_cule_device(args.cule_device, device, args.num_envs)
@@ -216,6 +245,71 @@ if __name__ == "__main__":
     target_network = QNetwork(envs, device=device)
     target_params = params_vals.clone().lock_()
     target_params.to_module(target_network, preserve_module_state=True)
+
+    curve_file = None
+    curve_writer = None
+    if args.learning_curve_path:
+        curve_path = os.path.abspath(args.learning_curve_path)
+        os.makedirs(os.path.dirname(curve_path), exist_ok=True)
+        curve_file = open(curve_path, "w", encoding="utf-8", newline="")
+        curve_writer = csv.DictWriter(
+            curve_file,
+            fieldnames=[
+                "algorithm",
+                "seed",
+                "frames",
+                "training_seconds",
+                "worker_wall_seconds",
+                "reward_mean",
+                "reward_median",
+                "reward_min",
+                "reward_max",
+                "reward_std",
+                "length_mean",
+                "length_median",
+                "length_min",
+                "length_max",
+                "length_std",
+            ],
+        )
+        curve_writer.writeheader()
+
+    last_evaluation_step = [-1]
+
+    def evaluate_and_log(frames: int, training_seconds: float) -> float:
+        if curve_writer is None:
+            return 0.0
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        evaluation_started = time.perf_counter()
+        q_network.eval()
+
+        def greedy_actions(states: torch.Tensor) -> torch.Tensor:
+            return q_network(states).argmax(dim=1)
+
+        stats = evaluate_cule_policy(
+            args.env_id,
+            greedy_actions,
+            device,
+            num_episodes=args.evaluation_episodes,
+            seed=args.evaluation_seed,
+            max_episode_steps=args.evaluation_max_episode_steps,
+        )
+        q_network.train()
+        evaluation_seconds = time.perf_counter() - evaluation_started
+        row = {
+            "algorithm": "dqn",
+            "seed": args.seed,
+            "frames": frames,
+            "training_seconds": training_seconds,
+            "worker_wall_seconds": time.perf_counter() - process_start,
+            **stats,
+        }
+        curve_writer.writerow(row)
+        curve_file.flush()
+        last_evaluation_step[0] = frames
+        print(f"EVALUATION_RESULT {json.dumps(row, sort_keys=True)}", flush=True)
+        return evaluation_seconds
 
     def update(data):
         with torch.no_grad():
@@ -252,6 +346,12 @@ if __name__ == "__main__":
     reset_result = envs.reset(seed=args.seed)
     reset_obs = reset_result[0] if isinstance(reset_result, tuple) else reset_result
     obs = to_tensor(reset_obs, device)
+    epsilon_tensor = torch.zeros((), device=device)
+    evaluation_seconds_total = 0.0
+    if curve_writer is not None and not args.benchmark:
+        evaluate_and_log(0, 0.0)
+    learning_wall_start = time.perf_counter()
+    next_evaluation_step = args.evaluation_interval
     avg_returns = deque(maxlen=20)
     global_step = 0
     learner_updates = 0
@@ -264,17 +364,28 @@ if __name__ == "__main__":
     measure_start_step = 0
 
     num_vector_steps = math.ceil(args.total_timesteps / args.num_envs)
-    pbar = tqdm.tqdm(range(num_vector_steps))
-    for _ in pbar:
+    if args.benchmark:
+        num_vector_steps = args.benchmark_warmup_iterations + args.benchmark_measure_iterations
+    pbar = tqdm.tqdm(range(num_vector_steps), disable=args.benchmark)
+    benchmark_start = None
+    benchmark_start_step = None
+    benchmark_start_updates = None
+    for vector_step in pbar:
+        if args.benchmark and vector_step == args.benchmark_warmup_iterations:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            benchmark_start = time.perf_counter()
+            benchmark_start_step = global_step
+            benchmark_start_updates = learner_updates
         epsilon_value = linear_schedule(
             args.start_e,
             args.end_e,
             args.exploration_fraction * args.total_timesteps,
             global_step,
         )
-        epsilon = torch.tensor(epsilon_value, device=device)
+        epsilon_tensor.fill_(epsilon_value)
         with torch.no_grad():
-            actions = policy(obs, epsilon)
+            actions = policy(obs, epsilon_tensor)
 
         # CuLE reuses and mutates its observation tensor on every step.
         transition_obs = obs.clone()
@@ -326,13 +437,21 @@ if __name__ == "__main__":
                         learner_updates // args.target_network_frequency + 1
                     ) * args.target_network_frequency
 
+        if curve_writer is not None and not args.benchmark and global_step >= next_evaluation_step:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            training_seconds = time.perf_counter() - learning_wall_start - evaluation_seconds_total
+            evaluation_seconds_total += evaluate_and_log(global_step, training_seconds)
+            while next_evaluation_step <= global_step:
+                next_evaluation_step += args.evaluation_interval
+
                 if measure_start_time is None and learner_updates >= args.measure_burnin:
                     if device.type == "cuda":
                         torch.cuda.synchronize(device)
                     measure_start_time = time.time()
                     measure_start_step = global_step
 
-        if measure_start_time is not None and global_step % max(args.num_envs * 100, 1) == 0:
+        if not args.benchmark and measure_start_time is not None and global_step % max(args.num_envs * 100, 1) == 0:
             speed = (global_step - measure_start_step) / max(time.time() - measure_start_time, 1e-9)
             pbar.set_description(f"speed: {speed:4.1f} sps, epsilon: {epsilon_value:4.2f}{desc}")
             if args.track and loss is not None:
@@ -342,9 +461,49 @@ if __name__ == "__main__":
                         "episode_return": np.mean(avg_returns) if avg_returns else np.nan,
                         "loss": loss,
                         "q_value": q_value,
-                        "epsilon": epsilon,
+                        "epsilon": epsilon_value,
                     },
                     step=global_step,
                 )
 
+    if args.benchmark:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        benchmark_end = time.perf_counter()
+        measured_steps = global_step - benchmark_start_step
+        measured_updates = learner_updates - benchmark_start_updates
+        measured_seconds = benchmark_end - benchmark_start
+        result = {
+            "algorithm": "dqn",
+            "backend": args.env_backend,
+            "batch_size": args.batch_size,
+            "benchmark": "full_training_loop",
+            "compile": args.compile,
+            "cudagraphs": args.cudagraphs,
+            "env_id": args.env_id,
+            "learner_updates": measured_updates,
+            "measure_iterations": args.benchmark_measure_iterations,
+            "measured_seconds": measured_seconds,
+            "measured_steps": measured_steps,
+            "num_envs": args.num_envs,
+            "peak_cuda_memory_mb": (
+                torch.cuda.max_memory_allocated() / (1024**2) if device.type == "cuda" else 0.0
+            ),
+            "process_seconds": benchmark_end - process_start,
+            "replay_ratio": measured_updates * args.batch_size / measured_steps,
+            "schema_version": 1,
+            "sps": measured_steps / measured_seconds,
+            "ups": measured_updates / measured_seconds,
+            "warmup_iterations": args.benchmark_warmup_iterations,
+        }
+        print(f"BENCHMARK_RESULT {json.dumps(result, sort_keys=True)}", flush=True)
+
+    if curve_writer is not None and not args.benchmark and last_evaluation_step[0] != global_step:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        training_seconds = time.perf_counter() - learning_wall_start - evaluation_seconds_total
+        evaluate_and_log(global_step, training_seconds)
+
     envs.close()
+    if curve_file is not None:
+        curve_file.close()

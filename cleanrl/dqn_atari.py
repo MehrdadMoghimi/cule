@@ -1,4 +1,5 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/dqn/#dqn_ataripy
+import json
 import os
 import random
 import sys
@@ -103,6 +104,12 @@ class Args:
     """stop when the moving episodic return reaches this value"""
     solve_window: int = 20
     """number of completed episodes in the solve moving average"""
+    benchmark: bool = False
+    """run a fixed warmup/measurement window and print a JSON benchmark result"""
+    benchmark_warmup_iterations: int = 10
+    """vector environment steps excluded from benchmark timing"""
+    benchmark_measure_iterations: int = 30
+    """vector environment steps included in benchmark timing"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -157,6 +164,7 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 
 
 if __name__ == "__main__":
+    process_start = time.perf_counter()
     args = tyro.cli(Args)
     if args.learner_updates_per_vector_step < 0:
         raise ValueError("learner_updates_per_vector_step must be non-negative")
@@ -168,6 +176,10 @@ if __name__ == "__main__":
         raise ValueError("max_training_seconds must be non-negative")
     if args.num_envs < 1:
         raise ValueError("num_envs must be positive")
+    if args.benchmark_warmup_iterations < 0:
+        raise ValueError("benchmark_warmup_iterations cannot be negative")
+    if args.benchmark_measure_iterations < 1:
+        raise ValueError("benchmark_measure_iterations must be positive")
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -181,11 +193,12 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
+    writer = None if args.benchmark else SummaryWriter(f"runs/{run_name}")
+    if writer is not None:
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        )
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -194,6 +207,8 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     # env setup
     if args.env_backend == "cule":
@@ -231,7 +246,18 @@ if __name__ == "__main__":
     next_target_update = args.target_network_frequency
     next_log_step = max(10000, args.num_envs)
     num_vector_steps = int(np.ceil(args.total_timesteps / args.num_envs))
-    for _ in range(num_vector_steps):
+    if args.benchmark:
+        num_vector_steps = args.benchmark_warmup_iterations + args.benchmark_measure_iterations
+    benchmark_start = None
+    benchmark_start_step = None
+    benchmark_start_updates = None
+    for vector_step in range(num_vector_steps):
+        if args.benchmark and vector_step == args.benchmark_warmup_iterations:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            benchmark_start = time.perf_counter()
+            benchmark_start_step = global_step
+            benchmark_start_updates = learner_updates
         if args.max_training_seconds and time.time() - start_time >= args.max_training_seconds:
             break
         previous_global_step = global_step
@@ -261,7 +287,7 @@ if __name__ == "__main__":
         global_step += args.num_envs
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        solved = episode_stats.update(infos, global_step, writer)
+        solved = False if args.benchmark else episode_stats.update(infos, global_step, writer)
 
         rb.add(next_obs, actions, rewards, transition_dones)
 
@@ -297,7 +323,7 @@ if __name__ == "__main__":
                     learner_updates // args.target_network_frequency + 1
                 ) * args.target_network_frequency
 
-            if global_step >= next_log_step and num_updates:
+            if writer is not None and global_step >= next_log_step and num_updates:
                 sps = int(global_step / (time.time() - start_time))
                 writer.add_scalar("losses/td_loss", loss, global_step)
                 writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
@@ -318,16 +344,47 @@ if __name__ == "__main__":
         if solved:
             break
 
-    elapsed = time.time() - start_time
-    print("SPS:", int(global_step / elapsed))
-    print("learner updates:", learner_updates)
-    print("UPS:", learner_updates / elapsed)
-    print("effective UTD:", learner_updates / max(global_step - args.learning_starts, 1))
-    print(
-        "replay ratio:",
-        learner_updates * args.batch_size / max(global_step - args.learning_starts, 1),
-    )
-    episode_stats.print_summary()
+    if args.benchmark:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        benchmark_end = time.perf_counter()
+        measured_steps = global_step - benchmark_start_step
+        measured_updates = learner_updates - benchmark_start_updates
+        measured_seconds = benchmark_end - benchmark_start
+        result = {
+            "algorithm": "dqn",
+            "backend": args.env_backend,
+            "batch_size": args.batch_size,
+            "benchmark": "full_training_loop",
+            "compile": False,
+            "env_id": args.env_id,
+            "learner_updates": measured_updates,
+            "measure_iterations": args.benchmark_measure_iterations,
+            "measured_seconds": measured_seconds,
+            "measured_steps": measured_steps,
+            "num_envs": args.num_envs,
+            "peak_cuda_memory_mb": (
+                torch.cuda.max_memory_allocated(device) / (1024**2) if device.type == "cuda" else 0.0
+            ),
+            "process_seconds": benchmark_end - process_start,
+            "replay_ratio": measured_updates * args.batch_size / measured_steps,
+            "schema_version": 1,
+            "sps": measured_steps / measured_seconds,
+            "ups": measured_updates / measured_seconds,
+            "warmup_iterations": args.benchmark_warmup_iterations,
+        }
+        print(f"BENCHMARK_RESULT {json.dumps(result, sort_keys=True)}", flush=True)
+    else:
+        elapsed = time.time() - start_time
+        print("SPS:", int(global_step / elapsed))
+        print("learner updates:", learner_updates)
+        print("UPS:", learner_updates / elapsed)
+        print("effective UTD:", learner_updates / max(global_step - args.learning_starts, 1))
+        print(
+            "replay ratio:",
+            learner_updates * args.batch_size / max(global_step - args.learning_starts, 1),
+        )
+        episode_stats.print_summary()
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
@@ -356,4 +413,5 @@ if __name__ == "__main__":
             push_to_hub(args, episodic_returns, repo_id, "DQN", f"runs/{run_name}", f"videos/{run_name}-eval")
 
     envs.close()
-    writer.close()
+    if writer is not None:
+        writer.close()

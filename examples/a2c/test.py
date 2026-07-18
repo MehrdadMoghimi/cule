@@ -12,7 +12,12 @@ def test(args, policy_net, env):
     if args.use_openai_test_env:
         observation = torch.from_numpy(env.reset()).squeeze(1)
     else:
-        observation = env.reset(initial_steps=50).squeeze(-1)
+        evaluation_seeds = torch.arange(
+            args.evaluation_seed,
+            args.evaluation_seed + num_ales,
+            dtype=torch.int32,
+        )
+        observation = env.reset(seeds=evaluation_seeds, initial_steps=50).squeeze(-1)
 
     lengths = torch.zeros(num_ales, dtype=torch.int32)
     rewards = torch.zeros(num_ales, dtype=torch.float32)
@@ -38,7 +43,10 @@ def test(args, policy_net, env):
     while not all_done.all():
         logit = policy_net(states)[1]
 
-        actions = F.softmax(logit, dim=1).multinomial(1).cpu()
+        if getattr(args, 'evaluation_deterministic', False):
+            actions = logit.argmax(dim=1, keepdim=True).cpu()
+        else:
+            actions = F.softmax(logit, dim=1).multinomial(1).cpu()
         actions[fire_reset] = 1
 
         observation, reward, done, info = env.step(maybe_npy(actions))
