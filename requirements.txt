@@ -2,6 +2,7 @@
 # matching your CUDA setup: https://pytorch.org/get-started/locally/).
 torch
 torchrl==0.13.2
+tensordict
 gymnasium
 ale-py
 numpy
@@ -12,6 +13,15 @@ psutil
 pytz
 tensorboard
 tqdm
+
+# cleanrl/ trainers
+tyro
+wandb
+huggingface_hub
+
+# optional: the `--env-backend envpool` alternative to CuLE. Not available for
+# every platform, and every trainer runs without it.
+# envpool
 
 # tests
 pytest

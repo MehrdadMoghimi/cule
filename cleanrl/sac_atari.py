@@ -1,3 +1,5 @@
+# Adapted from CleanRL's cleanrl/sac_atari.py
+# (https://github.com/vwxyzjn/cleanrl, MIT; license in cleanrl/LICENSE.md).
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/sac/#sac_ataripy
 import os
 import random

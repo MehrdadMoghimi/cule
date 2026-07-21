@@ -1,3 +1,5 @@
+# Adapted from CleanRL's cleanrl_utils/evals/c51_eval.py
+# (https://github.com/vwxyzjn/cleanrl, MIT; license in cleanrl/LICENSE.md).
 import random
 from argparse import Namespace
 from typing import Callable

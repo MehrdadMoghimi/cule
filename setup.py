@@ -177,6 +177,8 @@ setup(name='torchcule',
       url='https://github.com/NVlabs/cule',
       author='Steven Dalton',
       author_email='sdalton1@gmail.com',
+      maintainer='Mehrdad Moghimi',
+      license='BSD-3-Clause',
       python_requires='>=3.9',
       install_requires=['gymnasium>=1.0', 'ale-py>=0.10', 'numpy'],
       ext_modules=[

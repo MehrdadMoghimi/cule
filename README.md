@@ -51,34 +51,34 @@ env-step corresponds to four emulated Atari frames:
 
 Full compiled-PPO training loop on Breakout (environment stepping, inference,
 advantage computation, backpropagation, and optimizer updates), CuLE vs
-[EnvPool](https://github.com/sail-sg/envpool) 1.2.5:
+[EnvPool](https://github.com/sail-sg/envpool) 1.2.5. Mean steps/second over
+3–6 repeats per point:
 
 | Setting | CuLE SPS | EnvPool SPS |
 |---|---:|---:|
-| 256 envs (equal count) | 16,112 | 17,229 |
-| Each backend's best count | **42,464** (at 2,048 envs) | 20,812 (at 512 envs) |
+| 256 envs (equal count) | 14,927 | 18,927 |
+| Each backend's best count | **37,811** (at 2,048 envs) | 21,031 (at 1,024 envs) |
 
 EnvPool, which steps environments on the CPU, is slightly ahead at small
 environment counts. CuLE keeps scaling: at its best batch size it delivers
-**about 2× EnvPool's peak throughput** on this machine, and the gap widens
-with the environment count. The native V-trace example goes further still,
-reaching ~60k SPS at 12,288 environments.
+**about 1.8× EnvPool's peak training throughput** on this machine, and the
+gap widens with the environment count. The native V-trace example goes
+further still, reaching ~60k SPS at 12,288 environments.
 
-## Does the speed translate into learning?
+## How far does it scale?
 
-Paired 10M-transition PPO runs on Breakout — identical hyperparameters for
-both backends within each pair, and all checkpoints evaluated with the same
-64 parallel full-game evaluators:
+The same comparison swept across environment counts, for the compiled-PPO and
+PQN training loops and for environment stepping with no learner:
 
-![Compiled PPO on Breakout: matched CuLE vs EnvPool by training time](media/images/ppo_breakout_cule_vs_envpool.png)
+![CuLE vs EnvPool throughput scaling on Breakout](media/images/cule_envpool_scaling.png)
 
-At 512–2,048 environments, CuLE reaches high scores earlier in wall-clock
-training time (e.g. mean reward 600 in ~4 minutes at 1,024–2,048 envs, versus
-~5.5–7 minutes for EnvPool), and the best final score of the experiment
-(682 mean reward) came from CuLE at 2,048 environments. At 256 environments
-the relationship reverses and EnvPool is the better choice. These are
-single-seed runs measured before the renderer optimization landed, so current
-CuLE throughput is higher still.
+The pattern is the same in every panel: EnvPool leads while it has spare CPU
+cores, then saturates and plateaus, while CuLE keeps climbing on the GPU. The
+crossover is around **512 environments**. Beyond it, CuLE's lead grows with the
+batch — PPO training peaks near **1.8×** EnvPool, and pure environment stepping
+reaches **~2.9×** (CuLE ~111k SPS at 8,192 envs versus EnvPool's ~38k plateau).
+CuLE also holds a flat ~1 GB host-RAM footprint across the whole range, while
+EnvPool's grows to ~10 GB at 8,192 envs.
 
 **Rule of thumb:** if you can batch ≥512 environments, CuLE is the faster
 backend end to end; below that, a CPU vectorizer like EnvPool wins on a
@@ -137,7 +137,12 @@ Notes:
   modern release tag as shown above (setup.py errors out early otherwise).
 - The unmaintained `agency` submodule needs small fixes for GCC >= 9;
   setup.py applies [third_party/patches/agency-modern-toolchain.patch](third_party/patches/agency-modern-toolchain.patch)
-  automatically when it is missing.
+  automatically when it is missing. Because upstream
+  [agency](https://github.com/agency-library/agency) is no longer maintained,
+  `.gitmodules` points at a personal fork that carries the same fix, so a fresh
+  clone builds without the patch step. Both are NVIDIA's 3-clause BSD code; the
+  fork changes only what the patch changes. Repoint the submodule at upstream
+  if you would rather apply the patch yourself.
 - A Dockerfile with the full build is available at [envs/Dockerfile](envs/Dockerfile)
   (see the original README below for docker usage).
 
@@ -300,6 +305,29 @@ pip install pytest
 pytest              # fast checks (~1 minute; GPU tests auto-skip without CUDA)
 pytest -m slow      # end-to-end training micro-runs for a2c/vtrace/ppo/dqn
 ```
+
+# Licensing and credit
+
+This repository is a fork of [NVlabs/cule](https://github.com/NVlabs/cule) and
+is distributed under the same 3-clause BSD license.
+
+- Original CuLE — Copyright (c) 2017-2019, NVIDIA CORPORATION. The upstream
+  notice is preserved verbatim in [LICENSE.TXT](LICENSE.TXT).
+- This fork's additions (the trainers, benchmarks, tests, and the modernization
+  and GPU-kernel work) — Copyright (c) 2026, Mehrdad Moghimi, under the same
+  BSD terms.
+
+The trainers in [cleanrl/](cleanrl/) bundle code from three MIT-licensed
+projects — [CleanRL](https://github.com/vwxyzjn/cleanrl),
+[LeanRL](https://github.com/meta-pytorch/LeanRL), and
+[stable-baselines3](https://github.com/DLR-RM/stable-baselines3) — and the
+algorithms this fork ported itself follow the authors' official releases. Each
+script names its own provenance in its header;
+[cleanrl/LICENSE.md](cleanrl/LICENSE.md) has the full license texts and a
+per-file table.
+
+No Atari ROMs are distributed here; `ale-py` supplies them at runtime under its
+own terms. See [NOTICE.md](NOTICE.md) for the complete picture.
 
 ---
 

@@ -1,3 +1,10 @@
+# Atari network, hyperparameters, and training loop adapted from CleanRL's
+# cleanrl/dqn_atari.py (https://github.com/vwxyzjn/cleanrl, MIT).
+# The torch.compile / CUDA-graph structure — detached inference params via
+# from_module, CudaGraphModule capture, and GPU-resident TorchRL replay — follows
+# LeanRL's leanrl/dqn_torchcompile.py (https://github.com/meta-pytorch/LeanRL,
+# MIT), which targets classic-control DQN rather than Atari.
+# Both licenses are reproduced in cleanrl/LICENSE.md.
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/dqn/#dqn_ataripy
 import csv
 import json

@@ -1,3 +1,10 @@
+# Adapted from LeanRL's leanrl/ppo_atari_envpool_torchcompile.py
+# (https://github.com/meta-pytorch/LeanRL, MIT), which is itself a
+# torch.compile / CUDA-graph rewrite of CleanRL's cleanrl/ppo_atari_envpool.py
+# (https://github.com/vwxyzjn/cleanrl, MIT).  The rollout/gae/update split,
+# TensorDict containers, and CudaGraphModule usage come from LeanRL; the CuLE
+# backend and evaluation hooks are this fork's.
+# Both licenses are reproduced in cleanrl/LICENSE.md.
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_atari_envpoolpy
 import csv
 import json

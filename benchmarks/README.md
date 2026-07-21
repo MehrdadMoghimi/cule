@@ -35,6 +35,7 @@ RTX 4090 are summarized in the [project README](../README.md).
 Each `analyze_*.py` script aggregates the artifacts of its matching runner
 into summary CSVs and plots:
 
+- `analyze_cule_envpool.py` ← `benchmark_cule_envpool.py`
 - `analyze_implementation_benchmark.py` ← `benchmark_implementations.py`
 - `analyze_learning_benchmark.py` ← `benchmark_learning.py`
 - `analyze_torchcompile_breakout_10m.py` ← `search_torchcompile_breakout.py --selected-10m`

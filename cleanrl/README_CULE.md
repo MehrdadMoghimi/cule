@@ -8,9 +8,16 @@ episodic life, and clipped training rewards.
 
 This integration contains code adapted from
 [CleanRL](https://github.com/vwxyzjn/cleanrl) and
-[LeanRL](https://github.com/meta-pytorch/LeanRL). Both projects are available
-under the MIT License; their copyright and license notices are preserved in
+[LeanRL](https://github.com/meta-pytorch/LeanRL), plus Atari wrappers from
+[stable-baselines3](https://github.com/DLR-RM/stable-baselines3). All three are
+MIT licensed; their copyright and license notices are preserved in
 [LICENSE.md](LICENSE.md).
+
+Every script states its own provenance in its header: which upstream file it
+was adapted from, and — for the algorithms this fork ported itself (QR-DQN,
+IQN, FQF, DER, DrQ(ε), SPR, M-IQN, BBF) — which official implementation the
+algorithm and hyperparameters came from. [LICENSE.md](LICENSE.md) summarizes
+both in a table.
 
 Examples:
 
@@ -38,13 +45,16 @@ conda run -n cule312 python cleanrl/ppo_atari_envpool_torchcompile.py \
   --env-id PongNoFrameskip-v4 --compile
 ```
 
-PQN, C51, and Rainbow also have paired torch.compile entry points. Omitting
-the --compile flag runs the same implementation eagerly, which makes a matched
-throughput comparison straightforward. The PPO, DQN, PQN, and Rainbow variants
-additionally accept `--cudagraphs`, which captures the fixed-shape policy and
-learner update with tensordict's `CudaGraphModule` (combinable with
-`--compile`; PER sampling, priority-tree writes, and CuLE stepping stay
-outside the capture):
+Every bundled algorithm has a paired torch.compile entry point: PPO
+(`ppo_atari_envpool_torchcompile.py`), recurrent PPO
+(`ppo_atari_lstm_torchcompile.py`), DQN, C51, QR-DQN, IQN, FQF, Rainbow, PQN,
+discrete SAC (`sac_atari_torchcompile.py`), and QDagger
+(`qdagger_dqn_atari_impalacnn_torchcompile.py`). Omitting the --compile flag
+runs the same implementation eagerly, which makes a matched throughput
+comparison straightforward. All variants additionally accept `--cudagraphs`,
+which captures the fixed-shape policy and learner update with tensordict's
+`CudaGraphModule` (combinable with `--compile`; PER sampling, priority-tree
+writes, and CuLE stepping stay outside the capture):
 
 ~~~bash
 conda run -n cule312 python cleanrl/pqn_atari_envpool_torchcompile.py \
@@ -58,22 +68,174 @@ conda run -n cule312 python cleanrl/c51_atari_torchcompile.py \
 conda run -n cule312 python cleanrl/rainbow_atari_torchcompile.py \
   --env-backend cule --env-id PongNoFrameskip-v4 \
   --num-envs 256 --batch-size 512 --replay-ratio 1 --compile
+
+conda run -n cule312 python cleanrl/sac_atari_torchcompile.py \
+  --env-backend cule --env-id PongNoFrameskip-v4 \
+  --num-envs 256 --batch-size 512 --replay-ratio 1 --compile
+
+conda run -n cule312 python cleanrl/ppo_atari_lstm_torchcompile.py \
+  --env-backend cule --env-id PongNoFrameskip-v4 \
+  --num-envs 256 --num-steps 32 --compile
 ~~~
+
+## Distributional RL: C51, QR-DQN, IQN, FQF
+
+Alongside C51, the repository bundles the quantile-based distributional
+family: QR-DQN (`qrdqn_atari.py`, quantile regression over N fixed quantile
+midpoints), IQN (`iqn_atari.py`, implicit quantiles via a cosine embedding of
+sampled taus), and FQF (`fqf_atari.py`, a fraction-proposal network trained
+with its own RMSprop optimizer on the W1 gradient). All three support the
+`gymnasium`, `cule`, and `envpool` backends in both the eager and the
+torch.compile variants, share the C51 trainer structure (decoupled
+collection, `--replay-ratio`, benchmark mode), and default to the paper
+hyperparameters (learning rate 5e-5; QR-DQN N=200, IQN N=N'=64/K=32,
+FQF N=32 with fraction learning rate 2.5e-9):
+
+```bash
+conda run -n cule312 python cleanrl/qrdqn_atari.py \
+  --env-backend cule --env-id PongNoFrameskip-v4 --num-envs 256 \
+  --batch-size 512 --replay-ratio 1
+
+conda run -n cule312 python cleanrl/iqn_atari_torchcompile.py \
+  --env-backend cule --env-id PongNoFrameskip-v4 \
+  --num-envs 256 --batch-size 512 --replay-ratio 1 --compile --cudagraphs
+
+conda run -n cule312 python cleanrl/fqf_atari_torchcompile.py \
+  --env-backend envpool --env-id Pong-v5 \
+  --num-envs 256 --batch-size 512 --replay-ratio 1 --compile
+```
+
+IQN and FQF draw their quantile samples inside the compiled/captured
+regions; PyTorch's graph-safe Philox RNG keeps replays statistically fresh
+under `--cudagraphs`. FQF's two losses touch disjoint parameter sets, so the
+learner performs a single backward over their sum, which keeps the update
+region compilable.
+
+## Atari-100K: DER and DrQ(ε)
+
+`der_atari.py` (Data-Efficient Rainbow, van Hasselt et al. 2019) and
+`drq_atari.py` (DrQ(ε), Kostrikov et al. 2020 with the ε-greedy evaluation of
+Agarwal et al. 2021) are ported from the official Dopamine implementations in
+`dopamine/labs/atari_100k` (`DER.gin`, `DrQ_eps.gin`). The defaults reproduce
+the official single-environment configuration: a 100K-step budget, batch 32,
+one update per environment step, n-step 10, Adam 1e-4 with epsilon 1.5e-4,
+learning starts at 1,600 transitions, and Dopamine's warmup-then-linear-decay
+exploration schedule. DER keeps the full Rainbow components with the labs'
+prioritized-replay scheme (priorities `sqrt(loss)`, fixed `1/sqrt(prob)`
+importance weights — alpha = beta = 0.5, no annealing); DrQ(ε) is Efficient
+DQN (dueling, double, non-distributional, uniform n-step replay, target sync
+every update) with DrQ random-shift/intensity augmentation enabled by
+default. Both accept `--data-augmentation`, support all three backends, and
+keep the family's `--replay-ratio` semantics for vectorized runs:
+
+```bash
+conda run -n cule312 python cleanrl/der_atari.py \
+  --env-id BreakoutNoFrameskip-v4   # official 100K single-env configuration
+
+conda run -n cule312 python cleanrl/drq_atari.py \
+  --env-backend cule --env-id PongNoFrameskip-v4 \
+  --num-envs 64 --batch-size 64 --replay-ratio 32   # vectorized collection
+```
+
+Note that the Atari-100K protocol is defined for a single environment; with
+vectorized collection, keep `--replay-ratio` near the official 32 sampled
+items per transition if sample-efficiency comparability matters.
+
+## Atari-100K: SPR, M-IQN, and BBF
+
+The rest of the sample-efficiency family is ported from the author releases:
+
+- `spr_atari.py` (Schwarzer et al. 2021, from `mila-iqia/spr`): the DER-style
+  Rainbow base (noisy std 0.5, dueling hidden 256, double DQN, C51, PER with
+  beta annealed to 1) plus the SPR objective — a convolutional transition
+  model rolled K=5 steps, the q_l1 projection (deterministic first dueling
+  layers), a linear predictor, an EMA target encoder/projection (tau 0.01),
+  and a normalized-L2 matching loss with weight 5, masked past terminals.
+  Two updates per environment step, target sync every update, grad-norm clip
+  10 per official parameter group, shift+intensity augmentation on learner
+  and behavior-policy inputs. Deviations from the official code: the inert
+  reward predictor (loss weight 0) is omitted, and n-step windows crossing a
+  terminal are excluded from sampling rather than truncated.
+- `miqn_atari.py` (Munchausen-IQN, Vieillard et al. 2020, from
+  google-research/munchausen_rl): IQN with N = N' = K = 32 whose target adds
+  `alpha * clip(tau * ln pi(a|s), -1, 0)` to the reward and bootstraps the
+  soft expectation `sum_a pi(a|s')(z_j(s',a) - tau ln pi(a|s'))` with
+  `pi = softmax(Q/tau)` from the target network (alpha 0.9, tau 0.03). The
+  behavior policy samples `softmax(Q/tau)` via Gumbel-max (official
+  `interact='stochastic'`); pass `--interact greedy` for argmax.
+- `bbf_atari.py` (Schwarzer et al. 2023, from Google Research's
+  `bigger_better_faster`, `configs/BBF.gin`): Impala-CNN encoder (width 4,
+  two residual blocks per stage, min-max renormalized latents), a 2048-unit
+  projection as the shared hidden layer of dueling C51 heads, the SPR
+  objective with targets from the single EMA target network (tau 0.005),
+  action selection from the target network, DrQ augmentation, prioritized
+  replay, AdamW (weight decay 0.1), exponential anneals of the update
+  horizon 10 -> 3 and gamma 0.97 -> 0.997 over the 10k gradient steps after
+  each reset, and shrink-and-perturb resets (0.5/0.5 on encoder and
+  transition model, hard resets elsewhere) every 20k gradient steps.
+
+All three support the `gymnasium`, `cule`, and `envpool` backends and have
+paired torch.compile entry points (`*_torchcompile.py`) accepting `--compile`
+and `--cudagraphs`. Their sequence replay stays on the host; the compiled
+learner update covers the full loss (including the K-step rollout, and for
+BBF the EMA target update). BBF's shrink-and-perturb resets zero the AdamW
+moments in place under CUDA graphs so captured graphs stay valid across
+resets. Compiled speedups are largest for SPR (about +80% at 64 envs on an
+RTX 4090; its rollout is launch-bound) and smaller for BBF (compute-bound in
+the width-4 Impala encoder).
+
+## QDagger
+
+`qdagger_dqn_atari_impalacnn.py` distills a pretrained Nature-CNN DQN teacher
+into an Impala-CNN student (offline phase on a teacher-generated replay, then
+online fine-tuning with an annealed distillation coefficient). It supports
+vectorized collection on all three backends — `gymnasium`, `cule`, and
+`envpool` — with teacher evaluation and replay generation running on the same
+vectorized backend. The teacher checkpoint comes from the CleanRL Hugging
+Face hub by default (`--teacher-policy-hf-repo`), or from a local file via
+`--teacher-model-path`. Note that the default hub repo name is derived from
+`--env-id`, so with the EnvPool backend (`Breakout-v5`-style ids) pass the
+repo or a local checkpoint explicitly.
+
+```bash
+conda run -n cule312 python cleanrl/qdagger_dqn_atari_impalacnn.py \
+  --env-backend cule --env-id BreakoutNoFrameskip-v4 \
+  --num-envs 256 --batch-size 512 --replay-ratio 1
+
+conda run -n cule312 python cleanrl/qdagger_dqn_atari_impalacnn_torchcompile.py \
+  --env-backend envpool --env-id Breakout-v5 \
+  --teacher-policy-hf-repo cleanrl/BreakoutNoFrameskip-v4-dqn_atari-seed1 \
+  --num-envs 256 --batch-size 512 --replay-ratio 1 --compile --cudagraphs
+```
+
+The torchcompile QDagger variant keeps both the teacher replay and the online
+replay on the training GPU (TorchRL `LazyTensorStorage`), so its default
+`--teacher-steps`, `--offline-steps`, and `--buffer-size` are 100k rather
+than the eager trainer's 500k/500k/1M (full stacked transitions cost about
+53 MB per 1k transitions).
+
+The CuLE vector wrapper steps the backend asynchronously by default (no host
+synchronization per step; outputs stay stream-ordered, and host-side reads
+such as episode logging synchronize on access). Pass `sync_step=True` to
+`CuLEVectorEnv` to restore fully synchronous stepping. On an RTX 4090 at 256
+envs asynchronous stepping is worth about +5.7% PQN SPS eagerly and +2.5%
+with `--compile --cudagraphs`.
 
 The scripts used to benchmark these trainers (throughput sweeps, CuLE vs
 EnvPool comparisons, and fixed-budget learning runs) live in
 [benchmarks/](../benchmarks/); headline results are summarized in the
 [project README](../README.md).
 
-The `torchcompile` DQN, C51, and Rainbow variants use TorchRL's GPU-resident
-`LazyTensorStorage` replay. Rainbow retains prioritized replay with a CUDA
+The `torchcompile` DQN, C51, QR-DQN, IQN, FQF, and Rainbow variants use
+TorchRL's GPU-resident `LazyTensorStorage` replay. Rainbow retains prioritized replay with a CUDA
 sum/min tree; the installed TorchRL wheel's native prioritized-replay extension
 is not compatible with this PyTorch build. This checkout pins TorchRL 0.13.2 in
 both `requirements.txt` and the conda environment definition.
 
 All bundled algorithms support vectorized CuLE collection. `--cule-device auto`
 uses the training GPU for 32 or more environments and the CPU for smaller
-batches. DQN, C51, Rainbow, and discrete SAC decouple collection from learning:
+batches. DQN, C51, QR-DQN, IQN, FQF, Rainbow, discrete SAC, and QDagger
+decouple collection from learning:
 `--learner-updates-per-vector-step` directly controls optimizer launches and may
 be fractional. `--replay-ratio` is often easier to compare across environment
 and minibatch counts; it means sampled replay items per newly collected

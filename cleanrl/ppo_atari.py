@@ -1,3 +1,5 @@
+# Adapted from CleanRL's cleanrl/ppo_atari.py
+# (https://github.com/vwxyzjn/cleanrl, MIT; license in cleanrl/LICENSE.md).
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
 import json
 import os

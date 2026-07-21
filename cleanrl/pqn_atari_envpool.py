@@ -1,3 +1,5 @@
+# Adapted from CleanRL's cleanrl/pqn_atari_envpool.py
+# (https://github.com/vwxyzjn/cleanrl, MIT; license in cleanrl/LICENSE.md).
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/pqn/#pqn_atari_envpoolpy
 import json
 import os

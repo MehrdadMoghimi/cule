@@ -1,3 +1,8 @@
+# torch.compile twin of c51_atari.py, which is adapted from CleanRL's
+# cleanrl/c51_atari.py (https://github.com/vwxyzjn/cleanrl, MIT).  The
+# compile / CUDA-graph structure follows LeanRL
+# (https://github.com/meta-pytorch/LeanRL, MIT).  Both licenses are
+# reproduced in cleanrl/LICENSE.md.
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/c51/#c51_ataripy
 """C51 Atari with optional torch.compile and GPU-resident TorchRL replay.
 

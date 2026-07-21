@@ -1,3 +1,8 @@
+# torch.compile twin of pqn_atari_envpool.py, which is adapted from CleanRL's
+# cleanrl/pqn_atari_envpool.py (https://github.com/vwxyzjn/cleanrl, MIT).  The
+# compile / CUDA-graph structure follows LeanRL
+# (https://github.com/meta-pytorch/LeanRL, MIT).  Both licenses are
+# reproduced in cleanrl/LICENSE.md.
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/pqn/#pqn_atari_envpoolpy
 """PQN Atari with optional torch.compile and CUDA graphs on fixed-shape regions.
 

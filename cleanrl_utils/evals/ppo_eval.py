@@ -1,3 +1,5 @@
+# Adapted from CleanRL's cleanrl_utils/evals/ppo_eval.py
+# (https://github.com/vwxyzjn/cleanrl, MIT; license in cleanrl/LICENSE.md).
 from typing import Callable
 
 import gymnasium as gym

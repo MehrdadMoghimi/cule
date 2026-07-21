@@ -1,3 +1,5 @@
+# Adapted from CleanRL's cleanrl_utils/evals/dqn_eval.py
+# (https://github.com/vwxyzjn/cleanrl, MIT; license in cleanrl/LICENSE.md).
 import random
 from typing import Callable
 

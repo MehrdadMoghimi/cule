@@ -191,6 +191,26 @@ actions (environment stepping only, no learner):
 - Kernel grid-size computations use integer ceiling division; the previous
   `float` ceil could drop trailing blocks above ~16.7M elements (e.g.
   `generate_frames` with ~100K+ environments).
+- **Backend kernels launch on torch's current stream.** `AtariEnv.set_stream`
+  (new) accepts a raw CUDA stream handle; the Python `Env` binds torch's
+  current stream on every `step`/`reset`. Upstream instead relied on its
+  private stream being a *blocking* stream, i.e. on implicit ordering through
+  the legacy default stream, which breaks silently on non-default torch
+  streams. Same-stream launching makes the ordering explicit and makes
+  `Env.step` capturable
+  inside `torch.cuda.graph` (validated: a PQN-style policy + epsilon-greedy +
+  `env.step` rollout step captured and replayed correctly).
+- **Asynchronous stepping in the CleanRL wrapper.** `CuLEVectorEnv` now steps
+  with `asyn=True` by default (`sync_step=True` restores the old behavior),
+  removing a host synchronization per step. All step outputs are GPU tensors
+  and stay stream-ordered; host reads (logging) synchronize on access. PQN at
+  256 envs: +5.7% SPS eager, +2.5% with `--compile --cudagraphs`
+  (13.6k→14.4k and 14.6k→15.0k on the RTX 4090).
+- **Ring-buffer frame stacking in the CleanRL wrapper**: the per-step
+  `clone()`+shift of the stacked frames is replaced by a double-length ring
+  (each frame written twice, observations are a zero-copy slice). Verified
+  bit-identical over 600 steps including terminations; removes the per-step
+  allocation, which keeps the step CUDA-graph-capturable.
 
 All optimizations are verified bit-exact against pre-change golden rollouts
 (observations, rewards, dones, lives, RAM) on both backends, across 12 games
@@ -204,9 +224,23 @@ training micro-runs.
   cartridge mappers), the Gymnasium wrapper stack, and end-to-end training
   micro-runs for a2c, vtrace, ppo and dqn (`pytest -m slow`).
 - `cleanrl/` single-file trainers with a CuLE backend (adapted from CleanRL
-  and LeanRL): PPO, recurrent PPO, DQN, C51, Rainbow, PQN, and discrete SAC,
-  plus `torch.compile`/CUDA-graph variants of PPO, DQN, C51, Rainbow, and
-  PQN. See `cleanrl/README_CULE.md`.
+  and LeanRL): PPO, recurrent PPO, DQN, C51, Rainbow, PQN, discrete SAC, and
+  QDagger (Impala-CNN student distilled from a DQN teacher; CuLE, EnvPool,
+  and Gymnasium backends). Every algorithm has a paired
+  `torch.compile`/CUDA-graph variant. See `cleanrl/README_CULE.md`.
+- Distributional RL family alongside C51: QR-DQN, IQN, and FQF trainers
+  (`qrdqn_atari.py`, `iqn_atari.py`, `fqf_atari.py`), each supporting the
+  CuLE, EnvPool, and Gymnasium backends plus a paired
+  `torch.compile`/CUDA-graph variant. Verified against the author
+  implementations (Dopamine's quantile and implicit-quantile agents,
+  microsoft/FQF).
+- Atari-100K sample-efficiency family ported from the author releases, each
+  with CuLE/EnvPool/Gymnasium backends and a paired
+  `torch.compile`/CUDA-graph variant: `der_atari.py` and `drq_atari.py`
+  (from `dopamine/labs/atari_100k`), `spr_atari.py` (from `mila-iqia/spr`),
+  `miqn_atari.py` (Munchausen-IQN, from google-research/munchausen_rl), and
+  `bbf_atari.py` (from Google Research's `bigger_better_faster`, including
+  shrink-and-perturb resets and the annealed horizon/discount schedules).
 - `benchmarks/` scripts for throughput sweeps (raw stepping, CuLE vs EnvPool,
   cross-implementation) and fixed-budget learning comparisons, with matching
   `analyze_*` aggregators. Results are written to the git-ignored

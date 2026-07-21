@@ -1,3 +1,8 @@
+# torch.compile twin of rainbow_atari.py, which is adapted from CleanRL's
+# cleanrl/rainbow_atari.py (https://github.com/vwxyzjn/cleanrl, MIT).  The
+# compile / CUDA-graph structure follows LeanRL
+# (https://github.com/meta-pytorch/LeanRL, MIT).  Both licenses are
+# reproduced in cleanrl/LICENSE.md.
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/rainbow/#rainbow_ataripy
 """Rainbow Atari with optional torch.compile, CUDA graphs, and GPU TorchRL replay.
 

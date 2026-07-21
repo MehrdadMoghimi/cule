@@ -1,4 +1,10 @@
-"""Small replay buffer subset required by the bundled CleanRL Atari scripts."""
+"""Small replay buffer subset required by the bundled CleanRL Atari scripts.
+
+``ReplayBuffer`` reimplements the stable-baselines3 buffer API that CleanRL's
+scripts call (https://github.com/DLR-RM/stable-baselines3, MIT); the
+frame-efficient ``AtariReplayBuffer`` and the prioritized variant are this
+fork's own.
+"""
 
 from __future__ import annotations
 
