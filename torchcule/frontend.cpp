@@ -248,6 +248,11 @@ PYBIND11_MODULE(torchcule_atari, m) {
             env.generate_random_actions((AtariAction*) actionBuffer);
         }
     )
+    .def("set_stream", [](AtariEnv& env, uint64_t stream_handle)
+        {
+            env.set_stream(stream_handle);
+        }
+    )
     .def("sync_other_stream", [](AtariEnv& env)
         {
             // cudaStream_t stream = at::cuda::getCurrentCUDAStream();

@@ -62,6 +62,8 @@ class AtariEnv : public cule::atari::wrapper
 
       void sync_this_stream(cudaStream_t& stream);
 
+      void set_stream(uint64_t stream_handle);
+
       template<typename ExecutionPolicy>
       ExecutionPolicy& get_policy();
 

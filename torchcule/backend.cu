@@ -222,6 +222,16 @@ sync_this_stream(cudaStream_t& stream)
 
 void
 AtariEnv::
+set_stream(uint64_t stream_handle)
+{
+    if(use_cuda)
+    {
+        get_policy<cule_policy>().set_external_stream(reinterpret_cast<cudaStream_t>(stream_handle));
+    }
+}
+
+void
+AtariEnv::
 set_cuda(const bool use_cuda, const int32_t gpu_id)
 {
     if(this->use_cuda != use_cuda)

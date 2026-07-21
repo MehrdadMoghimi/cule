@@ -29,7 +29,18 @@ public:
 
     void sync() const
     {
-        CULE_ERRCHK(cudaStreamSynchronize(stream));
+        CULE_ERRCHK(cudaStreamSynchronize(getStream()));
+    }
+
+    // Launch all subsequent kernels on a caller-owned stream (e.g. torch's
+    // current stream) instead of the internal one. Handle 0 selects the
+    // legacy default stream. Passing the caller's stream removes the implicit
+    // legacy-stream ordering dependency and makes the dispatch sequence
+    // capturable by CUDA graphs.
+    void set_external_stream(const cudaStream_t& externalStream)
+    {
+        external_stream = externalStream;
+        use_external_stream = true;
     }
 
     void insert_other_stream(const cudaStream_t& otherStream) const
@@ -54,11 +65,13 @@ public:
 
     cudaStream_t getStream() const
     {
-        return stream;
+        return use_external_stream ? external_stream : stream;
     }
 
 private:
     cudaStream_t stream;
+    cudaStream_t external_stream = nullptr;
+    bool use_external_stream = false;
 };
 
 const parallel_execution_policy par{};

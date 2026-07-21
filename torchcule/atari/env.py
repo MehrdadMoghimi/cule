@@ -120,6 +120,9 @@ class Env(torchcule_atari.AtariEnv):
         self.cache_index = torch.zeros((num_envs,), device=self.device, dtype=torch.int32)
 
         self.set_cuda(self.is_cuda, self._gpu_index())
+        # handle of the torch stream the backend is currently bound to; the
+        # backend launches on its own stream until the first _bind_torch_stream
+        self._bound_stream = None
         self.initialize(self.states.data_ptr(),
                         self.frame_states.data_ptr(),
                         self.ram.data_ptr(),
@@ -140,6 +143,18 @@ class Env(torchcule_atari.AtariEnv):
             return -1
         return self.device.index if self.device.index is not None else torch.cuda.current_device()
 
+    def _bind_torch_stream(self):
+        """Launch backend kernels on torch's current stream.
+
+        Same-stream execution makes the torch<->CuLE ordering explicit (instead
+        of relying on legacy-default-stream semantics) and lets CUDA graph
+        capture record the step kernels.
+        """
+        stream = torch.cuda.current_stream(self.device).cuda_stream
+        if stream != self._bound_stream:
+            self.set_stream(stream)
+            self._bound_stream = stream
+
     def to(self, device):
         if self.is_cuda:
             torch.cuda.current_stream().synchronize()
@@ -149,6 +164,8 @@ class Env(torchcule_atari.AtariEnv):
         self.device = torch.device(device)
         self.is_cuda = self.device.type == 'cuda'
         self.set_cuda(self.is_cuda, self._gpu_index())
+        # set_cuda recreates the execution policy, dropping any bound stream
+        self._bound_stream = None
 
         self.observations1 = self.observations1.to(self.device)
         self.observations2 = self.observations2.to(self.device)
@@ -238,6 +255,7 @@ class Env(torchcule_atari.AtariEnv):
             seeds = torch.randint(np.iinfo(np.int32).max, (self.num_envs,), dtype=torch.int32, device=self.device)
 
         if self.is_cuda:
+            self._bind_torch_stream()
             self.sync_other_stream()
             stream = torch.cuda.current_stream()
 
@@ -290,6 +308,7 @@ class Env(torchcule_atari.AtariEnv):
             player_b_actions_ptr = 0
 
         if self.is_cuda:
+            self._bind_torch_stream()
             self.sync_other_stream()
 
         for frame in range(self.frameskip):

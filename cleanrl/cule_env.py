@@ -1,4 +1,9 @@
-"""Tensor-native CuLE vector environment helpers for the CleanRL Atari scripts."""
+"""Tensor-native CuLE vector environment helpers for the CleanRL Atari scripts.
+
+Original to this fork.  It exposes torchcule through the subset of the
+Gymnasium vector API that the bundled CleanRL-derived trainers call, so no
+CleanRL or LeanRL code is reused here.
+"""
 
 from __future__ import annotations
 
@@ -31,12 +36,17 @@ class CuLEVectorEnv:
         clip_rewards: bool = True,
         frame_stack: int = 4,
         stats_interval: int = 128,
+        sync_step: bool = False,
     ) -> None:
         self.device = torch.device(device)
         self.num_envs = num_envs
         self.frame_stack = frame_stack
         self.clip_rewards = clip_rewards
         self.stats_interval = max(1, stats_interval)
+        # sync_step=False steps the backend asynchronously; results are still
+        # stream-ordered for GPU consumers, and the periodic episode-stat flush
+        # (a .cpu() read) is the only host-side reader.
+        self.sync_step = sync_step
         self._step_count = 0
 
         self.env = AtariEnv(
@@ -63,9 +73,14 @@ class CuLEVectorEnv:
         )
         self.observation_space = self.single_observation_space
 
+        # Frame stacking uses a double-length ring: every new frame is written
+        # at _ring_pos and _ring_pos + frame_stack, so the newest `frame_stack`
+        # frames are always readable as one slice and no per-step shift copy is
+        # needed.
         self._frames = torch.zeros(
-            (num_envs, frame_stack, 84, 84), device=self.device, dtype=torch.uint8
+            (num_envs, 2 * frame_stack, 84, 84), device=self.device, dtype=torch.uint8
         )
+        self._ring_pos = frame_stack - 1
         self._episode_returns = torch.zeros(num_envs, device=self.device)
         self._episode_lengths = torch.zeros(num_envs, device=self.device, dtype=torch.int64)
         self._returned_returns = torch.zeros_like(self._episode_returns)
@@ -86,14 +101,23 @@ class CuLEVectorEnv:
     def _gray_frame(observations: torch.Tensor) -> torch.Tensor:
         return observations.squeeze(-1)
 
+    def _write_frame(self, frame: torch.Tensor) -> None:
+        self._frames[:, self._ring_pos].copy_(frame)
+        self._frames[:, self._ring_pos + self.frame_stack].copy_(frame)
+
+    def _obs_view(self) -> torch.Tensor:
+        start = self._ring_pos + 1
+        return self._frames[:, start : start + self.frame_stack]
+
     def reset(self, *, seed: int | None = None, **_: Any) -> tuple[torch.Tensor, dict[str, Any]]:
         observations = self.env.reset(seeds=self._seeds(seed), initial_steps=0)
         self._frames.zero_()
-        self._frames[:, -1].copy_(self._gray_frame(observations))
+        self._ring_pos = self.frame_stack - 1
+        self._write_frame(self._gray_frame(observations))
         self._episode_returns.zero_()
         self._episode_lengths.zero_()
         self._pending_episodes.zero_()
-        return self._frames, {}
+        return self._obs_view(), {}
 
     def _flush_episode_infos(self) -> dict[str, Any]:
         # Avoid a GPU-to-CPU synchronization on every environment step. Episode
@@ -119,7 +143,9 @@ class CuLEVectorEnv:
         self, actions: torch.Tensor | np.ndarray
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
         actions = torch.as_tensor(actions, device=self.device).reshape(self.num_envs)
-        observations, rewards, terminated, raw_info = self.env.step(actions)
+        observations, rewards, terminated, raw_info = self.env.step(
+            actions, asyn=not self.sync_step
+        )
         frame = self._gray_frame(observations)
 
         self._episode_returns.add_(rewards)
@@ -135,16 +161,16 @@ class CuLEVectorEnv:
         self._episode_returns.masked_fill_(game_over, 0)
         self._episode_lengths.masked_fill_(game_over, 0)
 
-        self._frames[:, :-1].copy_(self._frames[:, 1:].clone())
+        self._ring_pos = (self._ring_pos + 1) % self.frame_stack
         self._frames.mul_((~terminated).view(-1, 1, 1, 1))
-        self._frames[:, -1].copy_(frame)
+        self._write_frame(frame)
 
         self._step_count += 1
         infos = self._flush_episode_infos()
         infos["lives"] = raw_info["ale.lives"]
         truncations = torch.zeros_like(terminated)
         training_rewards = rewards.sign() if self.clip_rewards else rewards
-        return self._frames, training_rewards, terminated, truncations, infos
+        return self._obs_view(), training_rewards, terminated, truncations, infos
 
     def close(self) -> None:
         # torchcule owns no Python-side closeable resource.
