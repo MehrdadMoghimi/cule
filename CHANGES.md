@@ -54,7 +54,9 @@ Performance below).
     `std::tuple_size<T>` directly in `enable_if`, a hard error for non-tuple
     `T` on modern libstdc++. Replaced with a SFINAE-friendly wrapper.
 
-## Fixed upstream bugs
+## Fixed bugs
+
+Upstream defects unless noted otherwise.
 
 1. **14 games crashed at environment construction** (assault, bank_heist,
    battle_zone, centipede, double_dunk, kung_fu_master, ms_pacman, pitfall,
@@ -79,15 +81,18 @@ Performance below).
    in this fork (see next item). Upstream's own benchmark script silently
    excluded qbert, defender and elevator_action; the paper's experiments
    used games from the working set.
-8. **61 of the 63 decoded games are now verified working; upstream had
-   ~half of them silently running as the wrong game.** Four distinct bugs:
-   - **ROM identity (the big one): 76 of the 108 ROM dumps bundled with
-     ale-py have md5s that were missing from `rom_game_map`**
-     (`cule/atari/games/detail/types.hpp`), and an unmapped md5 silently
-     resolves to `GAME_TYPE` 0 — bowling. Those ROMs emulated fine but ran
-     with *bowling's* reward decoder, terminal detection, controller
-     attributes, and minimal action set (e.g. amidar's agent had no
-     LEFT/RIGHT and could never walk; ice_hockey "rewards" decoded
+8. **61 of the 63 decoded games are now verified working.** Four distinct
+   bugs — the first introduced by this fork's move to ale-py, the other
+   three genuine upstream defects:
+   - **ROM identity (the big one, and this fork's own doing): 76 of the 108
+     ROM dumps bundled with ale-py have md5s that were missing from
+     `rom_game_map`** (`cule/atari/games/detail/types.hpp`), and an unmapped
+     md5 silently resolves to `GAME_TYPE` 0 — bowling. Upstream's table was
+     complete for the atari-py dumps it was written against; ale-py ships
+     different dumps of the same games, so switching ROM sources dropped
+     ~half of them onto *bowling's* reward decoder, terminal detection,
+     controller attributes, and minimal action set (e.g. amidar's agent had
+     no LEFT/RIGHT and could never walk; ice_hockey "rewards" decoded
      bowling's score address, which holds ice hockey's game clock). Fixed
      by adding the 31 ale-py md5s for the games CuLE decodes.
    - **`FLAG_ALE_STARTED` double-use**: `environment::act()` overwrites the
