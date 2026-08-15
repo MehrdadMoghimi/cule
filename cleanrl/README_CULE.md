@@ -184,6 +184,40 @@ resets. Compiled speedups are largest for SPR (about +80% at 64 envs on an
 RTX 4090; its rollout is launch-bound) and smaller for BBF (compute-bound in
 the width-4 Impala encoder).
 
+## Recent algorithms
+
+Seven more trainers were ported from recent papers, each with the usual
+`*_torchcompile.py` twin and the same three backends:
+`hadamax_pqn_atari_envpool.py`, `btr_atari.py`, `stream_q_atari.py`,
+`stream_ac_atari.py`, `r2d2_atari.py`, `mrq_atari.py` and `disco_atari.py`.
+[ALGORITHM_LINEAGE.md](ALGORITHM_LINEAGE.md) is the reference for all seven: it
+records which existing file each one descends from, what it inherits unchanged,
+what it changes, and how the equivalence tests pin it to its official
+implementation.
+
+`disco_atari.py` is the one with an extra setup step. It runs DeepMind's
+*discovered* update rule, so it needs the published meta-parameters; they are
+downloaded once to `~/.cache/cule-disco/disco_103.npz` on first run, or can be
+pointed at an existing copy with `--meta-weights`.
+
+Three 2026 papers were added afterwards, eager-only for now:
+
+- `ibdqn_atari.py` (+ twin) — DQN with the **mean-expansion layer**
+  (arXiv:2606.29806), a final layer with no parameters that shares each TD error
+  across all actions. `--mean-scaling-coefficient` defaults to `k = n`; `0` is
+  plain DQN. The same flag on `iqn_atari.py` and its twin gives IB-IQN, and
+  defaults to off so IQN is untouched.
+- `ppo_rv_atari.py` — PPO whose critic learns **value differences**
+  `Delta(s_i, s_j)` instead of values, with advantages rebuilt from them
+  (R-GAE, arXiv:2607.21120). Diffed against the authors' code: 28/28.
+- `endpoint_ddqn_atari.py` — Double DQN with **Endpoint Replay**
+  (arXiv:2607.25123): a small recency buffer plus a coreset of chained n-step
+  transitions, trained with expectile Sarsa.
+
+`benchmarks/me_layer_gridworld.py` reruns the mean-expansion paper's tabular
+gridworld experiment; the outcome, including what did not reproduce, is in
+[ALGORITHM_LINEAGE.md](ALGORITHM_LINEAGE.md).
+
 ## QDagger
 
 `qdagger_dqn_atari_impalacnn.py` distills a pretrained Nature-CNN DQN teacher
