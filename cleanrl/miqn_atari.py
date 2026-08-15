@@ -412,7 +412,7 @@ if __name__ == "__main__":
                 if args.interact == "stochastic":
                     # Gumbel-max sampling from softmax(Q / tau)
                     uniform = torch.rand_like(q_values).clamp_min(1e-10)
-                    gumbel = -torch.log(-torch.log(uniform).clamp_min(1e-10))
+                    gumbel = -torch.log((-torch.log(uniform)).clamp_min(1e-10))
                     greedy_actions = torch.argmax(q_values / args.munchausen_tau + gumbel, dim=1)
                 else:
                     greedy_actions = torch.argmax(q_values, dim=1)
