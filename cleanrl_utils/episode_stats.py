@@ -59,9 +59,10 @@ class EpisodeStats:
                 f"batch_mean_return={batch_mean_return}, "
                 f"mean_return_{len(self.returns)}={mean_return}"
             )
-            writer.add_scalar("charts/episodic_return", batch_mean_return, global_step)
-            writer.add_scalar("charts/episodic_length", batch_mean_length, global_step)
-            writer.add_scalar("charts/episodic_return_mean", mean_return, global_step)
+            if writer is not None:  # benchmark runs have no writer
+                writer.add_scalar("charts/episodic_return", batch_mean_return, global_step)
+                writer.add_scalar("charts/episodic_length", batch_mean_length, global_step)
+                writer.add_scalar("charts/episodic_return_mean", mean_return, global_step)
         return self.solved_at_step is not None
 
     def print_summary(self) -> None:

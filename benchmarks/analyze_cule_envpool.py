@@ -161,21 +161,33 @@ def panels(training: list[dict], probe: list[dict]) -> list[tuple[str, str, list
     ]
 
 
-def plot_scaling(training: list[dict], probe: list[dict], output_dir: Path) -> dict[str, Path]:
-    """Write the combined 3-panel figure plus one standalone PNG per panel."""
-    specs = panels(training, probe)
-
-    combined, axes = plt.subplots(1, 3, figsize=(13.5, 4.6), sharex=False)
+def plot_grouped(specs: list[tuple[str, str, list[dict]]], path: Path, width: float = 4.5) -> None:
+    """Write one figure with the given panels side by side."""
+    figure, axes = plt.subplots(1, len(specs), figsize=(width * len(specs), 4.6), sharex=False)
+    axes = axes if len(specs) > 1 else [axes]
     for axis, (_, title, rows) in zip(axes, specs):
         draw_panel(axis, title, rows)
     axes[0].set_ylabel("steps / second")
     axes[0].legend(frameon=False, fontsize=9, loc="upper left")
-    combined.suptitle("CuLE vs EnvPool throughput scaling (Breakout-v5)", fontsize=13)
-    combined.tight_layout(rect=(0, 0, 1, 0.95))
-    combined.savefig(output_dir / "scaling.png", dpi=150)
-    plt.close(combined)
+    figure.suptitle("CuLE vs EnvPool throughput scaling (Breakout-v5)", fontsize=13)
+    figure.tight_layout(rect=(0, 0, 1, 0.95))
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
 
+
+def plot_scaling(training: list[dict], probe: list[dict], output_dir: Path) -> dict[str, Path]:
+    """Write the combined figures plus one standalone PNG per panel."""
+    specs = panels(training, probe)
+    by_slug = {slug: (slug, title, rows) for slug, title, rows in specs}
+
+    plot_grouped(specs, output_dir / "scaling.png")
     paths = {"combined": output_dir / "scaling.png"}
+
+    pair = [by_slug[slug] for slug in ("ppo", "probe") if by_slug.get(slug) and by_slug[slug][2]]
+    if len(pair) == 2:
+        plot_grouped(pair, output_dir / "scaling_ppo_probe.png", width=5.2)
+        paths["ppo_probe"] = output_dir / "scaling_ppo_probe.png"
+
     for slug, title, rows in specs:
         if not rows:
             continue

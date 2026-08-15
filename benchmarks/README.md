@@ -21,8 +21,15 @@ RTX 4090 are summarized in the [project README](../README.md).
 
 ## Learning
 
+- `breakout_algorithms.py` / `calibrate_breakout.py` / `plan_breakout.py` /
+  `benchmark_breakout.py` / `analyze_breakout.py` — the all-algorithm Breakout
+  benchmark. One entry per algorithm in the registry, a throughput calibration
+  that separates collection cost from gradient cost, a planner that turns those
+  measurements into an operating point, the runner, and the report generator.
+  Environment count is the only knob tuned; every other hyperparameter is pinned
+  to the value the algorithm publishes. See "Breakout, all algorithms" below.
 - `benchmark_learning.py` — fixed-budget (10M transitions) Breakout learning
-  comparison across algorithms with a shared evaluation protocol.
+  comparison across A2C, DQN, PPO and V-trace with a shared evaluation protocol.
 - `search_torchcompile_breakout.py` — short-budget hyperparameter search for
   the torchcompile PPO/PQN/Rainbow trainers, plus selected long reruns
   (`--selected-10m`).
@@ -35,6 +42,7 @@ RTX 4090 are summarized in the [project README](../README.md).
 Each `analyze_*.py` script aggregates the artifacts of its matching runner
 into summary CSVs and plots:
 
+- `analyze_breakout.py` ← `benchmark_breakout.py`
 - `analyze_cule_envpool.py` ← `benchmark_cule_envpool.py`
 - `analyze_implementation_benchmark.py` ← `benchmark_implementations.py`
 - `analyze_learning_benchmark.py` ← `benchmark_learning.py`
@@ -58,3 +66,38 @@ python benchmarks/benchmark_cule_envpool.py training \
 python benchmarks/run_ppo_breakout_paired_10m.py
 python benchmarks/analyze_ppo_breakout_paired_10m.py
 ```
+
+## Breakout, all algorithms
+
+A fixed-budget learning comparison across every trainer in `cleanrl/`, on
+`BreakoutNoFrameskip-v4` with the CuLE GPU backend. Environment count is the
+only knob tuned; everything else is pinned to the algorithm's published value.
+
+Run it in four steps — each stage writes to
+`benchmark_results/artifacts/breakout/` and every stage is resumable:
+
+```bash
+# 1. Measure collection cost and gradient cost separately, per algorithm
+python benchmarks/calibrate_breakout.py --variants eager
+
+# 2. Turn those measurements into an operating point (envs, replay ratio)
+python benchmarks/plan_breakout.py --variant eager --total-timesteps 1000000
+
+# 3. Run every algorithm at its planned operating point
+python benchmarks/benchmark_breakout.py --total-timesteps 1000000 --tag 1m
+
+# 4. Rank, plot and write the report
+python benchmarks/analyze_breakout.py --tag 1m
+```
+
+Why the calibration step exists: a replay trainer's shipped default is one
+environment with one minibatch per transition, so raising `--num-envs` without
+compensating would divide its gradient cadence by the environment count. The
+repo has already seen where that leads — the 2026-07 sweep ran Rainbow at 512
+environments with `--replay-ratio 1` and it never left random play. The
+calibration separates the two cost terms so environment count can be chosen for
+throughput while the *replay ratio* stays at the published value.
+
+`plan_breakout.py --budget-hours` caps how long one run may take; a trainer
+whose published cadence would exceed it has its replay ratio stepped down a
+power-of-two ladder, and the report flags every row where that happened.
