@@ -151,6 +151,8 @@ class Args:
     """vector-environment steps excluded from benchmark timing"""
     benchmark_measure_iterations: int = 30
     """vector-environment steps included in benchmark timing"""
+    mean_scaling_coefficient: float = 0.0
+    """IB-IQN's mean-expansion k (arXiv:2606.29806); 0 disables it, negative means k = n"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -231,8 +233,44 @@ def completed_episode_infos(infos, dones):
     return {}
 
 
+
+class MeanExpansionLayer(nn.Module):
+    """q = (I + (k/n) J) z, the mean-expansion layer of Nagarajan et al. (2026).
+
+    "Accelerating Q-learning through Efficient Value-Sharing across Actions",
+    ICML 2026 (arXiv:2606.29806). The mean component of the input is scaled by
+    k + 1 and added back to the component orthogonal to the all-ones vector,
+    equivalently the implicit baseline b = k * mean(z) is added to every entry.
+    No learnable parameters. Written as `scale * mean + residual` to match the
+    reference implementation printed in the paper's Appendix D.
+    """
+
+    def __init__(self, mean_scaling_coefficient: float, device=None):
+        super().__init__()
+        if mean_scaling_coefficient <= 0:
+            raise ValueError("the mean-scaling coefficient k must be positive here")
+        self.register_buffer(
+            "scale", torch.tensor(1.0 + float(mean_scaling_coefficient), device=device)
+        )
+
+    def forward(self, vec):
+        mean = vec.mean(dim=-1, keepdim=True)
+        residual = vec - mean
+        return self.scale * mean + residual
+
+    def extra_repr(self):
+        return f"k={self.scale.item() - 1.0:g}"
+
+
+def resolve_mean_scaling_coefficient(mean_scaling_coefficient: float, num_actions: int) -> float:
+    """0 disables the layer (plain IQN); negative selects the paper's k = n."""
+    if mean_scaling_coefficient == 0:
+        return 0.0
+    return float(num_actions) if mean_scaling_coefficient < 0 else float(mean_scaling_coefficient)
+
+
 class QNetwork(nn.Module):
-    def __init__(self, env, n_cos=64, n_policy_taus=32):
+    def __init__(self, env, n_cos=64, n_policy_taus=32, mean_scaling_coefficient=0.0):
         super().__init__()
         self.n_cos = int(n_cos)
         self.n_policy_taus = int(n_policy_taus)
@@ -251,6 +289,11 @@ class QNetwork(nn.Module):
         self.cos_embedding = nn.Linear(self.n_cos, self.feature_dim)
         self.fc = nn.Linear(self.feature_dim, 512)
         self.head = nn.Linear(512, self.n_actions)
+        # IB-IQN: "an ME layer is added at the end of the network", over the
+        # action axis, leaving the distributional representation untouched.
+        # Left out entirely when k = 0 so plain IQN stays bit-identical.
+        k = resolve_mean_scaling_coefficient(mean_scaling_coefficient, self.n_actions)
+        self.me_layer = MeanExpansionLayer(k) if k > 0 else None
 
     def features(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x / 255.0)
@@ -260,7 +303,8 @@ class QNetwork(nn.Module):
         cos = torch.cos(taus.unsqueeze(-1) * self.cos_multipliers)
         phi = F.relu(self.cos_embedding(cos))
         h = F.relu(self.fc(features.unsqueeze(1) * phi))
-        return self.head(h)
+        quantiles = self.head(h)
+        return quantiles if self.me_layer is None else self.me_layer(quantiles)
 
     def get_action(self, x: torch.Tensor, action: torch.Tensor | None = None):
         features = self.features(x)
@@ -364,8 +408,8 @@ if __name__ == "__main__":
     if not isinstance(envs.single_action_space, gym.spaces.Discrete):
         raise ValueError("only discrete action spaces are supported")
 
-    q_network = QNetwork(envs, args.n_cos, args.n_policy_taus).to(device)
-    target_network = QNetwork(envs, args.n_cos, args.n_policy_taus).to(device)
+    q_network = QNetwork(envs, args.n_cos, args.n_policy_taus, args.mean_scaling_coefficient).to(device)
+    target_network = QNetwork(envs, args.n_cos, args.n_policy_taus, args.mean_scaling_coefficient).to(device)
     target_network.load_state_dict(q_network.state_dict())
     optimizer = optim.Adam(
         q_network.parameters(),

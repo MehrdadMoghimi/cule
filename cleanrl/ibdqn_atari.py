@@ -1,23 +1,29 @@
-# IQN: Implicit Quantile Networks for Distributional Reinforcement Learning
-# (Dabney et al., 2018, https://arxiv.org/abs/1806.06923).
-# Cosine embedding, quantile sampling, and target construction verified against
-# the official Dopamine agent (google/dopamine,
-# dopamine/jax/agents/implicit_quantile/implicit_quantile_agent.py).
-# Structure follows c51_atari.py, which is adapted from CleanRL
-# (https://github.com/vwxyzjn/cleanrl, MIT; license in cleanrl/LICENSE.md).
-# Supports gymnasium, cule, and envpool backends.
+# Implicit-Baseline DQN (IB-DQN): DQN plus the mean-expansion layer of
+# "Accelerating Q-learning through Efficient Value-Sharing across Actions",
+# Nagarajan, Daley, White & Machado, ICML 2026 (arXiv:2606.29806).
+#
+# The trainer body is CleanRL's cleanrl/dqn_atari.py
+# (https://github.com/vwxyzjn/cleanrl, MIT; license in cleanrl/LICENSE.md);
+# the paper is explicit that IB-DQN "does not modify the underlying DQN
+# algorithm or its hyperparameters", so the only change is the final layer.
+#
+# The mean-expansion layer is q = (I + (k/n) J) z, where z is the network's
+# output, n = |A|, J is the all-ones matrix and k >= 0 is the mean-scaling
+# coefficient. It has no learnable parameters. k = 0 is the identity, i.e.
+# plain DQN, to within float round-off (2.4e-07 in fp32, not bit-exact).
+# Default k = n, the norm-minimizing baseline b* = sum(q_i)/(n+1) (Prop. 1).
+#
+# No official implementation has been published -- the paper's footnote points
+# at github.com/prabhatnagarajan/me_layer, which 404s as of 2026-08-08 -- but
+# Appendix D of the paper prints the reference PyTorch implementation in full,
+# and tests/test_me_layer_equivalence.py asserts this file against it.
 import json
-import math
 import os
 import random
 import sys
 import time
 from dataclasses import dataclass
 
-try:
-    import envpool
-except ImportError:
-    envpool = None
 import gymnasium as gym
 import numpy as np
 import torch
@@ -36,7 +42,6 @@ from cule_env import (
     make_cule_env,
     resolve_cule_device,
     step_env,
-    to_numpy,
     to_tensor,
 )
 
@@ -70,7 +75,7 @@ class Args:
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     env_backend: str = "gymnasium"
-    """environment backend: `gymnasium`, `cule`, or `envpool`"""
+    """environment backend: `gymnasium` or `cule`"""
     cule_device: str = "auto"
     """CuLE device; auto uses CUDA for 32+ envs and CPU for smaller batches"""
     save_model: bool = False
@@ -85,25 +90,17 @@ class Args:
     """the id of the environment"""
     total_timesteps: int = 10000000
     """total timesteps of the experiments"""
-    learning_rate: float = 5e-5
+    learning_rate: float = 1e-4
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    n_taus: int = 64
-    """the number of quantile samples for the online network"""
-    n_target_taus: int = 64
-    """the number of quantile samples for the TD target"""
-    n_policy_taus: int = 32
-    """the number of quantile samples for action selection"""
-    n_cos: int = 64
-    """the dimension of the cosine quantile embedding"""
-    kappa: float = 1.0
-    """the Huber threshold of the quantile regression loss"""
     buffer_size: int = 1000000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    target_network_frequency: int = 2500
+    tau: float = 1.0
+    """the target network update rate"""
+    target_network_frequency: int = 250
     """learner updates between target-network updates"""
     batch_size: int = 32
     """the batch size of sample from the reply memory"""
@@ -128,11 +125,11 @@ class Args:
     benchmark: bool = False
     """run a fixed warmup/measurement window and print a JSON benchmark result"""
     benchmark_warmup_iterations: int = 10
-    """vector-environment steps excluded from benchmark timing"""
+    """vector environment steps excluded from benchmark timing"""
     benchmark_measure_iterations: int = 30
-    """vector-environment steps included in benchmark timing"""
-    mean_scaling_coefficient: float = 0.0
-    """IB-IQN's mean-expansion k (arXiv:2606.29806); 0 disables it, negative means k = n"""
+    """vector environment steps included in benchmark timing"""
+    mean_scaling_coefficient: float = -1.0
+    """the mean-expansion layer's k; negative selects the paper's default k = n"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -160,80 +157,21 @@ def make_env(env_id, seed, idx, capture_video, run_name):
     return thunk
 
 
-class RecordEpisodeStatistics(gym.Wrapper):
-    """Expose EnvPool spaces and full-game statistics to the trainer."""
-
-    def __init__(self, env):
-        super().__init__(env)
-        self.num_envs = getattr(env, "num_envs", 1)
-        self.single_action_space = getattr(env, "single_action_space", env.action_space)
-        self.single_observation_space = getattr(env, "single_observation_space", env.observation_space)
-
-    def reset(self, **kwargs):
-        observations = super().reset(**kwargs)
-        self.episode_returns = np.zeros(self.num_envs, dtype=np.float32)
-        self.episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
-        self.returned_episode_returns = np.zeros(self.num_envs, dtype=np.float32)
-        self.returned_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
-        return observations
-
-    def step(self, action):
-        result = super().step(action)
-        if len(result) == 5:
-            observations, rewards, terminations, truncations, infos = result
-            dones = np.logical_or(terminations, truncations)
-        else:
-            observations, rewards, dones, infos = result
-        self.episode_returns += infos["reward"]
-        self.episode_lengths += 1
-        self.returned_episode_returns[:] = self.episode_returns
-        self.returned_episode_lengths[:] = self.episode_lengths
-        game_over = np.logical_and(dones, np.asarray(infos["lives"]) == 0)
-        self.episode_returns *= 1 - game_over
-        self.episode_lengths *= 1 - game_over
-        infos["r"] = self.returned_episode_returns
-        infos["l"] = self.returned_episode_lengths
-        if len(result) == 5:
-            return observations, rewards, terminations, truncations, infos
-        return observations, rewards, dones, infos
-
-
-def completed_episode_infos(infos, dones):
-    """Normalize per-backend episode statistics to the `final_info` format."""
-    if "final_info" in infos:
-        return infos
-    if "r" in infos:  # EnvPool RecordEpisodeStatistics
-        game_over = to_numpy(dones).astype(bool) & (np.asarray(infos["lives"]) == 0)
-        if game_over.any():
-            return {
-                "final_info": [
-                    {"episode": {"r": float(infos["r"][index]), "l": int(infos["l"][index])}}
-                    for index in np.flatnonzero(game_over)
-                ]
-            }
-    return {}
-
-
-# ALGO LOGIC: initialize agent here:
-
 class MeanExpansionLayer(nn.Module):
     """q = (I + (k/n) J) z, the mean-expansion layer of Nagarajan et al. (2026).
 
-    "Accelerating Q-learning through Efficient Value-Sharing across Actions",
-    ICML 2026 (arXiv:2606.29806). The mean component of the input is scaled by
-    k + 1 and added back to the component orthogonal to the all-ones vector,
-    equivalently the implicit baseline b = k * mean(z) is added to every entry.
-    No learnable parameters. Written as `scale * mean + residual` to match the
-    reference implementation printed in the paper's Appendix D.
+    The mean component of the input is scaled by k + 1 and added back to the
+    component orthogonal to the all-ones vector, which is the same thing as
+    adding the implicit baseline b = k * mean(z) to every entry. No learnable
+    parameters; k = 0 is the identity. Written as `scale * mean + residual` to
+    match the reference implementation printed in the paper's Appendix D.
     """
 
-    def __init__(self, mean_scaling_coefficient: float, device=None):
+    def __init__(self, mean_scaling_coefficient: float):
         super().__init__()
-        if mean_scaling_coefficient <= 0:
-            raise ValueError("the mean-scaling coefficient k must be positive here")
-        self.register_buffer(
-            "scale", torch.tensor(1.0 + float(mean_scaling_coefficient), device=device)
-        )
+        if mean_scaling_coefficient < 0:
+            raise ValueError("the mean-scaling coefficient k must be non-negative")
+        self.register_buffer("scale", torch.tensor(1.0 + float(mean_scaling_coefficient)))
 
     def forward(self, vec):
         mean = vec.mean(dim=-1, keepdim=True)
@@ -245,21 +183,17 @@ class MeanExpansionLayer(nn.Module):
 
 
 def resolve_mean_scaling_coefficient(mean_scaling_coefficient: float, num_actions: int) -> float:
-    """0 disables the layer (plain IQN); negative selects the paper's k = n."""
-    if mean_scaling_coefficient == 0:
-        return 0.0
+    """Negative means "use the paper's default", which is k = n."""
     return float(num_actions) if mean_scaling_coefficient < 0 else float(mean_scaling_coefficient)
 
 
+# ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, env, n_cos=64, n_policy_taus=32, mean_scaling_coefficient=0.0):
+    def __init__(self, env, mean_scaling_coefficient=-1.0):
         super().__init__()
-        self.n_cos = int(n_cos)
-        self.n_policy_taus = int(n_policy_taus)
-        self.n = int(env.single_action_space.n)
-        self.feature_dim = 3136
-        self.register_buffer("cos_multipliers", math.pi * torch.arange(1, n_cos + 1, dtype=torch.float32))
-        self.conv = nn.Sequential(
+        n = env.single_action_space.n
+        k = resolve_mean_scaling_coefficient(mean_scaling_coefficient, n)
+        self.network = nn.Sequential(
             nn.Conv2d(4, 32, 8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2),
@@ -267,35 +201,16 @@ class QNetwork(nn.Module):
             nn.Conv2d(64, 64, 3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
+            nn.Linear(3136, 512),
+            nn.ReLU(),
+            nn.Linear(512, n),
+            # "The mean-expansion layer is added immediately before the
+            # vector-valued output of a neural network" (Section 4.1).
+            MeanExpansionLayer(k),
         )
-        self.cos_embedding = nn.Linear(self.n_cos, self.feature_dim)
-        self.fc = nn.Linear(self.feature_dim, 512)
-        self.head = nn.Linear(512, self.n)
-        # IB-IQN: "an ME layer is added at the end of the network", over the
-        # action axis, leaving the distributional representation untouched.
-        # Left out entirely when k = 0 so plain IQN stays bit-identical.
-        k = resolve_mean_scaling_coefficient(mean_scaling_coefficient, self.n)
-        self.me_layer = MeanExpansionLayer(k) if k > 0 else None
 
-    def features(self, x):
-        return self.conv(x / 255.0)
-
-    def quantile_values(self, features, taus):
-        """Quantile values z_tau(x, a) with shape (batch, taus, actions)."""
-        cos = torch.cos(taus.unsqueeze(-1) * self.cos_multipliers)
-        phi = F.relu(self.cos_embedding(cos))
-        h = F.relu(self.fc(features.unsqueeze(1) * phi))
-        quantiles = self.head(h)
-        return quantiles if self.me_layer is None else self.me_layer(quantiles)
-
-    def get_action(self, x, action=None):
-        features = self.features(x)
-        taus = torch.rand(features.shape[0], self.n_policy_taus, device=features.device)
-        quantiles = self.quantile_values(features, taus)
-        q_values = quantiles.mean(1)
-        if action is None:
-            action = torch.argmax(q_values, 1)
-        return action, quantiles[torch.arange(quantiles.shape[0], device=quantiles.device), :, action]
+    def forward(self, x):
+        return self.network(x / 255.0)
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -316,10 +231,6 @@ if __name__ == "__main__":
         raise ValueError("max_training_seconds must be non-negative")
     if args.num_envs < 1:
         raise ValueError("num_envs must be positive")
-    if min(args.n_taus, args.n_target_taus, args.n_policy_taus, args.n_cos) < 1:
-        raise ValueError("n_taus, n_target_taus, n_policy_taus, and n_cos must be positive")
-    if args.kappa <= 0:
-        raise ValueError("kappa must be positive")
     if args.benchmark_warmup_iterations < 0:
         raise ValueError("benchmark_warmup_iterations cannot be negative")
     if args.benchmark_measure_iterations < 1:
@@ -358,19 +269,6 @@ if __name__ == "__main__":
     if args.env_backend == "cule":
         env_device = resolve_cule_device(args.cule_device, device, args.num_envs)
         envs = make_cule_env(args.env_id, args.num_envs, env_device, args.seed, args.capture_video)
-    elif args.env_backend == "envpool":
-        if envpool is None:
-            raise ImportError("EnvPool backend requested; install envpool or pass --env-backend cule")
-        envs = RecordEpisodeStatistics(
-            envpool.make(
-                args.env_id,
-                env_type="gym",
-                num_envs=args.num_envs,
-                episodic_life=True,
-                reward_clip=True,
-                seed=args.seed,
-            )
-        )
     elif args.env_backend == "gymnasium":
         envs = gym.vector.SyncVectorEnv(
             [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
@@ -379,11 +277,9 @@ if __name__ == "__main__":
         raise ValueError(f"unsupported environment backend: {args.env_backend}")
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    q_network = QNetwork(envs, n_cos=args.n_cos, n_policy_taus=args.n_policy_taus,
-                        mean_scaling_coefficient=args.mean_scaling_coefficient).to(device)
-    optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate, eps=0.01 / args.batch_size)
-    target_network = QNetwork(envs, n_cos=args.n_cos, n_policy_taus=args.n_policy_taus,
-                        mean_scaling_coefficient=args.mean_scaling_coefficient).to(device)
+    q_network = QNetwork(envs, args.mean_scaling_coefficient).to(device)
+    optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
+    target_network = QNetwork(envs, args.mean_scaling_coefficient).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
     rb = AtariReplayBuffer(
@@ -396,8 +292,7 @@ if __name__ == "__main__":
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
-    reset_result = envs.reset(seed=args.seed) if args.env_backend != "envpool" else envs.reset()
-    obs = reset_result[0] if isinstance(reset_result, tuple) else reset_result
+    obs, _ = envs.reset(seed=args.seed)
     rb.initialize(obs)
     global_step = 0
     update_budget = 0.0
@@ -434,7 +329,7 @@ if __name__ == "__main__":
             )
         else:
             with torch.no_grad():
-                greedy_actions, _ = q_network.get_action(to_tensor(obs, device))
+                greedy_actions = torch.argmax(q_network(to_tensor(obs, device)), dim=1)
             random_actions = torch.randint(
                 envs.single_action_space.n, (args.num_envs,), device=device
             )
@@ -442,21 +337,12 @@ if __name__ == "__main__":
             actions = torch.where(explore, random_actions, greedy_actions)
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        step_result = step_env(envs, actions)
-        if len(step_result) == 5:
-            next_obs, rewards, terminations, truncations, infos = step_result
-        else:
-            next_obs, rewards, terminations, infos = step_result
-            truncations = np.zeros_like(np.asarray(terminations), dtype=bool)
+        next_obs, rewards, terminations, truncations, infos = step_env(envs, actions)
         transition_dones = done_tensor(terminations, truncations, device).bool()
         global_step += args.num_envs
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        solved = False
-        if not args.benchmark:
-            solved = episode_stats.update(
-                completed_episode_infos(infos, transition_dones), global_step, writer
-            )
+        solved = False if args.benchmark else episode_stats.update(infos, global_step, writer)
 
         rb.add(next_obs, actions, rewards, transition_dones)
 
@@ -470,32 +356,11 @@ if __name__ == "__main__":
             update_budget -= num_updates
             for _ in range(num_updates):
                 data = rb.sample(args.batch_size)
-                batch_indices = torch.arange(args.batch_size, device=device)
                 with torch.no_grad():
-                    next_features = target_network.features(data.next_observations)
-                    # As in Dopamine's IQN, the next action comes from a separate
-                    # K-sample Q estimate; the target uses fresh tau' samples.
-                    action_taus = torch.rand(args.batch_size, args.n_policy_taus, device=device)
-                    next_action_z = target_network.quantile_values(next_features, action_taus)
-                    next_actions = torch.argmax(next_action_z.mean(1), dim=1)
-                    next_taus = torch.rand(args.batch_size, args.n_target_taus, device=device)
-                    next_z = target_network.quantile_values(next_features, next_taus)
-                    next_quantiles = next_z[batch_indices, :, next_actions]
-                    target_quantiles = data.rewards + args.gamma * next_quantiles * (1 - data.dones)
-
-                features = q_network.features(data.observations)
-                taus = torch.rand(args.batch_size, args.n_taus, device=device)
-                z = q_network.quantile_values(features, taus)
-                old_quantiles = z[batch_indices, :, data.actions.flatten()]
-
-                # pairwise TD errors u[b, i, j] = target_j - current_i
-                u = target_quantiles.unsqueeze(1) - old_quantiles.unsqueeze(2)
-                abs_u = u.abs()
-                huber = torch.where(
-                    abs_u <= args.kappa, 0.5 * u.pow(2), args.kappa * (abs_u - 0.5 * args.kappa)
-                )
-                rho = (taus.unsqueeze(-1) - (u.detach() < 0).float()).abs() * huber / args.kappa
-                loss = rho.mean(2).sum(1).mean()
+                    target_max, _ = target_network(data.next_observations).max(dim=1)
+                    td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
+                old_val = q_network(data.observations).gather(1, data.actions).squeeze()
+                loss = F.mse_loss(td_target, old_val)
 
                 # optimize the model
                 optimizer.zero_grad()
@@ -505,15 +370,17 @@ if __name__ == "__main__":
 
             # update target network
             if learner_updates >= next_target_update:
-                target_network.load_state_dict(q_network.state_dict())
+                for target_network_param, q_network_param in zip(target_network.parameters(), q_network.parameters()):
+                    target_network_param.data.copy_(
+                        args.tau * q_network_param.data + (1.0 - args.tau) * target_network_param.data
+                    )
                 next_target_update = (
                     learner_updates // args.target_network_frequency + 1
                 ) * args.target_network_frequency
 
-            if not args.benchmark and global_step >= next_log_step and num_updates:
-                old_val = old_quantiles.mean(1)
+            if writer is not None and global_step >= next_log_step and num_updates:
                 sps = int(global_step / (time.time() - start_time))
-                writer.add_scalar("losses/loss", loss.item(), global_step)
+                writer.add_scalar("losses/td_loss", loss, global_step)
                 writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
                 writer.add_scalar("charts/SPS", sps, global_step)
                 writer.add_scalar("charts/learner_updates", learner_updates, global_step)
@@ -533,8 +400,6 @@ if __name__ == "__main__":
             break
 
     if args.benchmark:
-        if benchmark_start is None or benchmark_start_step is None or benchmark_start_updates is None:
-            raise RuntimeError("benchmark measurement window did not start")
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         benchmark_end = time.perf_counter()
@@ -542,14 +407,12 @@ if __name__ == "__main__":
         measured_updates = learner_updates - benchmark_start_updates
         measured_seconds = benchmark_end - benchmark_start
         result = {
-            "algorithm": "iqn",
+            "algorithm": "ibdqn",
             "backend": args.env_backend,
             "batch_size": args.batch_size,
             "benchmark": "full_training_loop",
             "compile": False,
-            "env_device": str(getattr(envs, "device", "cpu")),
             "env_id": args.env_id,
-            "implementation": "original",
             "learner_updates": measured_updates,
             "measure_iterations": args.benchmark_measure_iterations,
             "measured_seconds": measured_seconds,
@@ -559,8 +422,7 @@ if __name__ == "__main__":
                 torch.cuda.max_memory_allocated(device) / (1024**2) if device.type == "cuda" else 0.0
             ),
             "process_seconds": benchmark_end - process_start,
-            "replay_backend": "numpy_frame_efficient",
-            "replay_ratio": measured_updates * args.batch_size / max(measured_steps, 1),
+            "replay_ratio": measured_updates * args.batch_size / measured_steps,
             "schema_version": 1,
             "sps": measured_steps / measured_seconds,
             "ups": measured_updates / measured_seconds,
@@ -579,15 +441,11 @@ if __name__ == "__main__":
         )
         episode_stats.print_summary()
 
-    if args.save_model and not args.benchmark:
+    if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-        model_data = {
-            "model_weights": q_network.state_dict(),
-            "args": vars(args),
-        }
-        torch.save(model_data, model_path)
+        torch.save(q_network.state_dict(), model_path)
         print(f"model saved to {model_path}")
-        from cleanrl_utils.evals.distributional_eval import evaluate
+        from cleanrl_utils.evals.dqn_eval import evaluate
 
         episodic_returns = evaluate(
             model_path,
@@ -595,8 +453,7 @@ if __name__ == "__main__":
             args.env_id,
             eval_episodes=10,
             run_name=f"{run_name}-eval",
-            Model=QNetwork,
-            model_kwargs_keys=("n_cos", "n_policy_taus"),
+            Model=lambda env: QNetwork(env, args.mean_scaling_coefficient),
             device=device,
             epsilon=args.end_e,
         )
@@ -608,7 +465,7 @@ if __name__ == "__main__":
 
             repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
             repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(args, episodic_returns, repo_id, "IQN", f"runs/{run_name}", f"videos/{run_name}-eval")
+            push_to_hub(args, episodic_returns, repo_id, "IB-DQN", f"runs/{run_name}", f"videos/{run_name}-eval")
 
     envs.close()
     if writer is not None:
