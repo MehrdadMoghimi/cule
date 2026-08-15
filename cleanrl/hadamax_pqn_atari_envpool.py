@@ -1,0 +1,468 @@
+# Hadamax: max-pooled Hadamard products of GELU-activated parallel convolutions
+# (Kooi et al., NeurIPS 2025, https://arxiv.org/abs/2505.15345).  Ported from the
+# official JAX implementation (https://github.com/jacobkooi/hadamax,
+# purejaxql/networks.py, `ENCODER == "hadamax"`).
+#
+# Hadamax is an encoder, not a learning rule: the parent's Q(lambda) objective,
+# rollout loop, optimizer, and every hyperparameter are inherited unchanged from
+# pqn_atari_envpool.py.  The only difference is `QNetwork`, whose Nature-CNN
+# trunk is replaced by three Hadamax blocks.
+#
+# The trainer body is adapted from CleanRL's cleanrl/pqn_atari_envpool.py
+# (https://github.com/vwxyzjn/cleanrl, MIT; license in cleanrl/LICENSE.md).
+# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/pqn/#pqn_atari_envpoolpy#
+# CONFIRMED against the official implementation:
+# `tests/crosscheck/check_hadamax.py` runs jacobkooi/hadamax's real Flax
+# QNetwork, loads its parameters into this file, and diffs every stage. 12/12
+# components match on CPU and CUDA (<= 1e-5): each Hadamard block, the 7744-wide
+# features, and the Q logits. One deliberate difference: Flax is NHWC and
+# flattens (H, W, C) while PyTorch is NCHW and flattens (C, H, W), so the
+# projection's input columns are a permutation of upstream's -- the same model,
+# relabelled, which the cross-check undoes before comparing.
+import json
+import os
+import random
+import sys
+import time
+from collections import deque
+from dataclasses import dataclass
+
+try:
+    import envpool
+except ImportError:
+    envpool = None
+import gymnasium as gym
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import tyro
+from torch.utils.tensorboard import SummaryWriter
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from cule_env import done_tensor, make_cule_env, step_env, to_tensor
+
+
+@dataclass
+class Args:
+    exp_name: str = os.path.basename(__file__)[: -len(".py")]
+    """the name of this experiment"""
+    seed: int = 1
+    """seed of the experiment"""
+    torch_deterministic: bool = True
+    """if toggled, `torch.backends.cudnn.deterministic=False`"""
+    cuda: bool = True
+    """if toggled, cuda will be enabled by default"""
+    track: bool = False
+    """if toggled, this experiment will be tracked with Weights and Biases"""
+    wandb_project_name: str = "cleanRL"
+    """the wandb's project name"""
+    wandb_entity: str = None
+    """the entity (team) of wandb's project"""
+    capture_video: bool = False
+    """whether to capture videos of the agent performances (check out `videos` folder)"""
+    env_backend: str = "envpool"
+    """environment backend: `envpool` or `cule`"""
+
+    # Algorithm specific arguments
+    env_id: str = "Breakout-v5"
+    """the id of the environment"""
+    total_timesteps: int = 10000000
+    """total timesteps of the experiments"""
+    learning_rate: float = 2.5e-4
+    """the learning rate of the optimizer"""
+    num_envs: int = 8
+    """the number of parallel game environments"""
+    num_steps: int = 128
+    """the number of steps to run in each environment per policy rollout"""
+    anneal_lr: bool = True
+    """Toggle learning rate annealing for policy and value networks"""
+    gamma: float = 0.99
+    """the discount factor gamma"""
+    num_minibatches: int = 4
+    """the number of mini-batches"""
+    update_epochs: int = 4
+    """the K epochs to update the policy"""
+    max_grad_norm: float = 10.0
+    """the maximum norm for the gradient clipping"""
+    start_e: float = 1
+    """the starting epsilon for exploration"""
+    end_e: float = 0.01
+    """the ending epsilon for exploration"""
+    exploration_fraction: float = 0.10
+    """the fraction of `total_timesteps` it takes from start_e to end_e"""
+    q_lambda: float = 0.65
+    """the lambda for the Q-Learning algorithm"""
+
+    benchmark: bool = False
+    """run a fixed warmup/measurement window and print a JSON benchmark result"""
+    benchmark_warmup_iterations: int = 3
+    """full training iterations excluded from benchmark timing"""
+    benchmark_measure_iterations: int = 10
+    """full training iterations included in benchmark timing"""
+
+    # to be filled in runtime
+    batch_size: int = 0
+    """the batch size (computed in runtime)"""
+    minibatch_size: int = 0
+    """the mini-batch size (computed in runtime)"""
+    num_iterations: int = 0
+    """the number of iterations (computed in runtime)"""
+
+
+class RecordEpisodeStatistics(gym.Wrapper):
+    def __init__(self, env, deque_size=100):
+        super().__init__(env)
+        self.num_envs = getattr(env, "num_envs", 1)
+        self.single_action_space = getattr(env, "single_action_space", env.action_space)
+        self.single_observation_space = getattr(env, "single_observation_space", env.observation_space)
+        self.episode_returns = None
+        self.episode_lengths = None
+
+    def reset(self, **kwargs):
+        observations = super().reset(**kwargs)
+        self.episode_returns = np.zeros(self.num_envs, dtype=np.float32)
+        self.episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
+        self.lives = np.zeros(self.num_envs, dtype=np.int32)
+        self.returned_episode_returns = np.zeros(self.num_envs, dtype=np.float32)
+        self.returned_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
+        return observations
+
+    def step(self, action):
+        result = super().step(action)
+        if len(result) == 5:
+            observations, rewards, terminations, truncations, infos = result
+            dones = np.logical_or(terminations, truncations)
+        else:
+            observations, rewards, dones, infos = result
+        self.episode_returns += infos["reward"]
+        self.episode_lengths += 1
+        self.returned_episode_returns[:] = self.episode_returns
+        self.returned_episode_lengths[:] = self.episode_lengths
+        self.episode_returns *= 1 - infos["terminated"]
+        self.episode_lengths *= 1 - infos["terminated"]
+        infos["r"] = self.returned_episode_returns
+        infos["l"] = self.returned_episode_lengths
+        if len(result) == 5:
+            return observations, rewards, terminations, truncations, infos
+        return observations, rewards, dones, infos
+
+
+# jax.nn.gelu defaults to approximate=True (the tanh form) and flax.linen's
+# LayerNorm defaults to epsilon=1e-6; PyTorch defaults to the exact erf GELU and
+# eps=1e-5.  Both defaults are matched to Flax below so the encoder is numerically
+# the official one.
+FLAX_LAYER_NORM_EPS = 1e-6
+
+
+class ChannelLayerNorm(nn.Module):
+    """LayerNorm over the channel axis of an NCHW tensor.
+
+    Flax's `nn.LayerNorm()` reduces the trailing axis, which is the channel axis
+    in the official NHWC encoder, so statistics are per spatial position.  The
+    PQN parent instead normalizes jointly over [C, H, W]; Hadamax keeps the
+    official per-position convention.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        # Flax's nn.LayerNorm defaults to epsilon=1e-6, PyTorch's to 1e-5.
+        self.norm = nn.LayerNorm(channels, eps=FLAX_LAYER_NORM_EPS)
+
+    def forward(self, x):
+        return self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+
+class HadamaxBlock(nn.Module):
+    """Max-pooled Hadamard product of two GELU-activated parallel convolutions.
+
+    Both branches see the same input, are normalized *before* the activation,
+    and are combined multiplicatively; the max-pool then does the spatial
+    downsampling that strided convolutions do in the Nature CNN.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, pool: nn.Module):
+        super().__init__()
+        # padding="same" with stride 1 reproduces Flax's SAME padding exactly,
+        # including the asymmetric split for even kernels.
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, stride=1, padding="same")
+        self.conv2 = nn.Conv2d(in_channels, out_channels, kernel_size, stride=1, padding="same")
+        for conv in (self.conv1, self.conv2):
+            nn.init.xavier_normal_(conv.weight)
+            nn.init.zeros_(conv.bias)
+        self.norm1 = ChannelLayerNorm(out_channels)
+        self.norm2 = ChannelLayerNorm(out_channels)
+        self.pool = pool
+
+    def forward(self, x):
+        branch1 = F.gelu(self.norm1(self.conv1(x)), approximate="tanh")
+        branch2 = F.gelu(self.norm2(self.conv2(x)), approximate="tanh")
+        return self.pool(branch1 * branch2)
+
+
+class QNetwork(nn.Module):
+    """PQN's Q-network with the Nature-CNN trunk replaced by the Hadamax encoder."""
+
+    def __init__(self, env):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            HadamaxBlock(4, 32, 8, nn.MaxPool2d(4, stride=4)),  # 84 -> 21
+            # ceil_mode reproduces Flax's SAME max-pool padding for odd inputs.
+            HadamaxBlock(32, 64, 4, nn.MaxPool2d(2, stride=2, ceil_mode=True)),  # 21 -> 11
+            HadamaxBlock(64, 64, 3, nn.MaxPool2d(3, stride=1, padding=1)),  # 11 -> 11
+            nn.Flatten(),
+        )
+        self.projection = nn.Linear(64 * 11 * 11, 512)
+        nn.init.kaiming_normal_(self.projection.weight)
+        nn.init.zeros_(self.projection.bias)
+        self.projection_norm = nn.LayerNorm(512, eps=FLAX_LAYER_NORM_EPS)
+        self.head = nn.Linear(512, env.single_action_space.n)
+
+    def forward(self, x):
+        hidden = self.encoder(x / 255.0)
+        hidden = F.gelu(self.projection_norm(self.projection(hidden)), approximate="tanh")
+        return self.head(hidden)
+
+
+def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
+    slope = (end_e - start_e) / duration
+    return max(slope * t + start_e, end_e)
+
+
+if __name__ == "__main__":
+    process_start = time.perf_counter()
+    args = tyro.cli(Args)
+    if args.num_envs < 1:
+        raise ValueError("num_envs must be positive")
+    if args.num_steps < 1:
+        raise ValueError("num_steps must be positive")
+    if args.num_minibatches < 1:
+        raise ValueError("num_minibatches must be positive")
+    if args.benchmark_warmup_iterations < 0:
+        raise ValueError("benchmark_warmup_iterations cannot be negative")
+    if args.benchmark_measure_iterations < 1:
+        raise ValueError("benchmark_measure_iterations must be positive")
+    args.batch_size = int(args.num_envs * args.num_steps)
+    args.minibatch_size = int(args.batch_size // args.num_minibatches)
+    if args.minibatch_size < 1:
+        raise ValueError("num_minibatches cannot exceed num_envs * num_steps")
+    args.num_iterations = args.total_timesteps // args.batch_size
+    if args.benchmark:
+        args.num_iterations = args.benchmark_warmup_iterations + args.benchmark_measure_iterations
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    if args.track:
+        import wandb
+
+        wandb.init(
+            project=args.wandb_project_name,
+            entity=args.wandb_entity,
+            sync_tensorboard=True,
+            config=vars(args),
+            name=run_name,
+            monitor_gym=True,
+            save_code=True,
+        )
+    writer = None if args.benchmark else SummaryWriter(f"runs/{run_name}")
+    if writer is not None:
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        )
+
+    # TRY NOT TO MODIFY: seeding
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+    # env setup
+    if args.env_backend == "cule":
+        envs = make_cule_env(args.env_id, args.num_envs, device, args.seed, args.capture_video)
+    elif args.env_backend == "envpool":
+        if envpool is None:
+            raise ImportError("EnvPool backend requested; install envpool or pass --env-backend cule")
+        envs = envpool.make(
+            args.env_id,
+            env_type="gym",
+            num_envs=args.num_envs,
+            episodic_life=True,
+            reward_clip=True,
+            seed=args.seed,
+        )
+        envs = RecordEpisodeStatistics(envs)
+    else:
+        raise ValueError(f"unsupported environment backend: {args.env_backend}")
+    assert hasattr(envs.single_action_space, "n"), "only discrete action space is supported"
+
+    q_network = QNetwork(envs).to(device)
+    optimizer = optim.RAdam(q_network.parameters(), lr=args.learning_rate)
+
+    # ALGO Logic: Storage setup
+    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+    rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    avg_returns = deque(maxlen=20)
+
+    # TRY NOT TO MODIFY: start the game
+    global_step = 0
+    start_time = time.time()
+    benchmark_start = None
+    benchmark_start_step = None
+    reset_result = envs.reset()
+    reset_obs = reset_result[0] if isinstance(reset_result, tuple) else reset_result
+    next_obs = to_tensor(reset_obs, device)
+    next_done = torch.zeros(args.num_envs).to(device)
+
+    for iteration in range(1, args.num_iterations + 1):
+        if args.benchmark and iteration == args.benchmark_warmup_iterations + 1:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            benchmark_start = time.perf_counter()
+            benchmark_start_step = global_step
+
+        # Annealing the rate if instructed to do so.
+        if args.anneal_lr:
+            frac = 1.0 - (iteration - 1.0) / args.num_iterations
+            lrnow = frac * args.learning_rate
+            optimizer.param_groups[0]["lr"] = lrnow
+
+        for step in range(0, args.num_steps):
+            global_step += args.num_envs
+            obs[step] = next_obs
+            dones[step] = next_done
+
+            epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
+
+            random_actions = torch.randint(0, envs.single_action_space.n, (args.num_envs,)).to(device)
+            with torch.no_grad():
+                q_values = q_network(next_obs)
+                max_actions = torch.argmax(q_values, dim=1)
+                values[step] = q_values[torch.arange(args.num_envs), max_actions].flatten()
+
+            explore = torch.rand((args.num_envs,)).to(device) < epsilon
+            action = torch.where(explore, random_actions, max_actions)
+            actions[step] = action
+
+            # TRY NOT TO MODIFY: execute the game and log data.
+            step_result = step_env(envs, action)
+            logging_dones = None
+            if len(step_result) == 5:
+                next_obs, reward, terminations, truncations, info = step_result
+                if not isinstance(terminations, torch.Tensor):
+                    logging_dones = np.logical_or(terminations, truncations)
+                next_done = done_tensor(terminations, truncations, device)
+            else:
+                next_obs, reward, next_done, info = step_result
+                logging_dones = np.asarray(next_done, dtype=bool)
+                next_done = to_tensor(next_done, device, torch.float32)
+            rewards[step] = to_tensor(reward, device).view(-1)
+            next_obs = to_tensor(next_obs, device)
+
+            if "final_info" in info:
+                for final_info in info["final_info"]:
+                    if final_info and "episode" in final_info:
+                        episode_return = final_info["episode"]["r"]
+                        if not args.benchmark:
+                            print(f"global_step={global_step}, episodic_return={episode_return}")
+                        avg_returns.append(episode_return)
+                        if writer is not None:
+                            writer.add_scalar("charts/avg_episodic_return", np.average(avg_returns), global_step)
+                            writer.add_scalar("charts/episodic_return", episode_return, global_step)
+                            writer.add_scalar("charts/episodic_length", final_info["episode"]["l"], global_step)
+            elif "r" in info:
+                game_overs = logging_dones & (info["lives"] == 0)
+                for idx in np.flatnonzero(game_overs):
+                    if not args.benchmark:
+                        print(f"global_step={global_step}, episodic_return={info['r'][idx]}")
+                    avg_returns.append(info["r"][idx])
+                    if writer is not None:
+                        writer.add_scalar("charts/avg_episodic_return", np.average(avg_returns), global_step)
+                        writer.add_scalar("charts/episodic_return", info["r"][idx], global_step)
+                        writer.add_scalar("charts/episodic_length", info["l"][idx], global_step)
+
+        # Compute Q(lambda) targets
+        with torch.no_grad():
+            returns = torch.zeros_like(rewards).to(device)
+            for t in reversed(range(args.num_steps)):
+                if t == args.num_steps - 1:
+                    next_value, _ = torch.max(q_network(next_obs), dim=-1)
+                    nextnonterminal = 1.0 - next_done
+                    returns[t] = rewards[t] + args.gamma * next_value * nextnonterminal
+                else:
+                    nextnonterminal = 1.0 - dones[t + 1]
+                    next_value = values[t + 1]
+                    returns[t] = (
+                        rewards[t]
+                        + args.gamma * (args.q_lambda * returns[t + 1] + (1 - args.q_lambda) * next_value) * nextnonterminal
+                    )
+
+        # flatten the batch
+        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
+        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        b_returns = returns.reshape(-1)
+
+        # Optimizing the Q-network
+        b_inds = np.arange(args.batch_size)
+        for epoch in range(args.update_epochs):
+            np.random.shuffle(b_inds)
+            for start in range(0, args.batch_size, args.minibatch_size):
+                end = start + args.minibatch_size
+                mb_inds = b_inds[start:end]
+
+                old_val = q_network(b_obs[mb_inds]).gather(1, b_actions[mb_inds].unsqueeze(-1).long()).squeeze()
+                loss = F.mse_loss(b_returns[mb_inds], old_val)
+
+                # optimize the model
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(q_network.parameters(), args.max_grad_norm)
+                optimizer.step()
+
+        if writer is not None:
+            writer.add_scalar("losses/td_loss", loss, global_step)
+            writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
+            print("SPS:", int(global_step / (time.time() - start_time)))
+            writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+    if args.benchmark:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        benchmark_end = time.perf_counter()
+        measured_steps = global_step - benchmark_start_step
+        measured_seconds = benchmark_end - benchmark_start
+        result = {
+            "algorithm": "hadamax_pqn",
+            "backend": args.env_backend,
+            "batch_size": args.batch_size,
+            "benchmark": "full_training_loop",
+            "compile": False,
+            "env_device": str(getattr(envs, "device", "cpu")),
+            "env_id": args.env_id,
+            "measure_iterations": args.benchmark_measure_iterations,
+            "measured_seconds": measured_seconds,
+            "measured_steps": measured_steps,
+            "num_envs": args.num_envs,
+            "num_minibatches": args.num_minibatches,
+            "num_steps": args.num_steps,
+            "peak_cuda_memory_mb": (
+                torch.cuda.max_memory_allocated(device) / (1024**2) if device.type == "cuda" else 0.0
+            ),
+            "process_seconds": benchmark_end - process_start,
+            "schema_version": 1,
+            "sps": measured_steps / measured_seconds,
+            "update_epochs": args.update_epochs,
+            "warmup_iterations": args.benchmark_warmup_iterations,
+        }
+        print(f"BENCHMARK_RESULT {json.dumps(result, sort_keys=True)}", flush=True)
+
+    envs.close()
+    if writer is not None:
+        writer.close()
