@@ -1,0 +1,6 @@
+# Upstream checkouts for the correctness cross-checks; never committed.
+# streaming-drl and MRQ are CC BY-NC 4.0, which is incompatible with this
+# repository's license; the rest would simply be vendored copies.
+*
+!.gitignore
+!README.md
