@@ -37,6 +37,61 @@ RTX 4090 are summarized in the [project README](../README.md).
   at 10M transitions: identical hyperparameters per pair, common CPU CuLE
   evaluation for both backends.
 
+## Correctness
+
+- `verify_chain.py` — train a trainer on an MDP whose optimal action-value
+  function is known exactly, then compare the learned Q against it entry by
+  entry. `../cleanrl/diagnostic_env.py` defines the MDP (a chain: advance five
+  states, collect the reward, terminate) and renders it into the same 84x84
+  uint8 four-frame observations Atari produces, so every trainer and every
+  network runs on it unmodified. `make_cule_env` routes to it whenever the env
+  id names it, which is why there is no new flag on any trainer.
+
+  This covers what the other two layers cannot. The equivalence tests in
+  `../tests/` check that each trainer computes the right formulas; the
+  cross-checks in `../tests/crosscheck/` check its components against the
+  authors' official code; a Breakout run only detects breakage severe enough to
+  clear seed noise. Wiring bugs — an unmasked terminal bootstrap, an off-by-one
+  in the discount, a stale target — survive all three and cost a few points of
+  final score. Against a closed form they are unmistakable:
+
+```bash
+python benchmarks/verify_chain.py --all             # every trainer, coverage table
+python benchmarks/verify_chain.py dqn_torchcompile --quiet
+python benchmarks/verify_chain.py --list            # trainers with a Q adapter
+
+# Confirm the check has teeth: mutate the trainer's source and watch it fail.
+python benchmarks/verify_chain.py dqn_torchcompile --inject-bug no-terminal-mask
+python benchmarks/verify_chain.py dqn_torchcompile --inject-bug discount-the-reward
+```
+
+  The report also fits the best scalar `c` in `Q ~ c * Q*`, because the common
+  bugs are scale errors with a known constant: dropping the terminal mask
+  converges to `Q*` times `1 / (1 - gamma**n)`, and discounting the reward as
+  well as the bootstrap converges to `Q*` times `gamma`. Both leave the greedy
+  policy intact, so no score curve can see them and this table names them.
+  `../tests/test_diagnostic_env.py` verifies the closed form against tabular
+  value iteration and the environment's dynamics against the model that value
+  iteration was given.
+
+  `chain_adapters.py` holds the per-trainer knowledge of *where* the value
+  function lives: a plain `Q(s, .)` head, a distribution over atoms or
+  quantiles, a critic's `V(s)`, a recurrent state that has to be carried down
+  the trajectory, or a latent only the trainer's own encoder defines. It also
+  records what kind of check each trainer supports — a full value comparison,
+  a greedy-policy check where no value is readable at a raw observation, or
+  unsupported with the reason. `--all` runs each trainer in its own subprocess
+  (sixty-two of them share module names, CUDA state and compile caches, and one
+  that hangs must not take the sweep with it) and writes per-trainer JSON plus
+  a summary to `benchmark_results/chain/`.
+
+  Budgets are per family, in `verify_chain.py`. This matters more than it
+  looks: A2C does one update per rollout, so 200k transitions buy it about 195
+  gradient steps and it fails the comparison for lack of training rather than
+  for being wrong. A false FAIL is the one outcome that would make the harness
+  untrustworthy, so the on-policy family gets a budget that buys a comparable
+  number of updates to the off-policy default.
+
 ## Analysis
 
 Each `analyze_*.py` script aggregates the artifacts of its matching runner
@@ -101,3 +156,99 @@ throughput while the *replay ratio* stays at the published value.
 `plan_breakout.py --budget-hours` caps how long one run may take; a trainer
 whose published cadence would exceed it has its replay ratio stepped down a
 power-of-two ladder, and the report flags every row where that happened.
+
+## Hyperparameter search
+
+Two passes, deliberately split by trial budget.
+
+`sweep_highenv.py` is the **breadth** pass: it pins the environment count as
+high as each algorithm can go (1,024, falling back to 512 then 256) and walks a
+hand-written ladder of candidates — feasibility, screen, refine, confirm — over
+all thirty-five trainers on a wall-clock budget. Nine to eleven trials per
+algorithm is below the number at which a model-based optimizer beats a ladder,
+which is exactly why the ladder is what runs here.
+
+```bash
+python benchmarks/sweep_highenv.py                    # all stages, all algorithms
+python benchmarks/analyze_highenv.py                  # rank and write the report
+```
+
+`sweep_protein.py` is the **depth** pass over the ladder's top finishers, using
+Protein — PufferAI's reworked CARBS, vendored as `protein.py` — to spend a
+hundred or more trials on one algorithm. It needs `gpytorch`, `scikit-learn`
+and `scipy`.
+
+```bash
+# top 5 of the ladder, 100 trials each, resumable
+python benchmarks/sweep_protein.py --top 5 --trials 100
+
+# re-run each winner at the full window on three seeds, then rewrite the report
+python benchmarks/sweep_protein.py --top 5 --stages confirm
+python benchmarks/sweep_protein.py --stages report
+```
+
+The training window is itself a searched dimension (30 s to `--max-window`) and
+is what Protein models as *cost*, so the search opens with cheap ~30 s trials
+and buys longer ones only where the score model says the neighbourhood is worth
+paying for. Cost is measured as wall clock *including startup*, which charges a
+`_torchcompile.py` twin for its compile and graph-capture time instead of
+letting the protocol hide it.
+
+Environment count, the eager/compiled variant and `--total-timesteps` are taken
+from the ladder's `state.json` and held fixed — the last of those because every
+annealing schedule in these trainers is a fraction of it, so searching it would
+make a faster configuration anneal more slowly. The variant is fixed rather than
+searched because it is not a continuum; `--variant both` runs it as two studies
+instead.
+
+## Cross-game exploration
+
+The sweeps above optimise a configuration. The `exp_h0NN_*.py` scripts do the
+opposite: they pin everything, move one thing, and record what changed. Results
+land in `benchmark_results/exploration/<experiment>/runs.jsonl`, keyed by a name
+that is unique within the experiment, so an interrupted run resumes by being
+launched again and a completed cell is never repeated.
+
+```bash
+# Training-free game profiles: random-policy baselines, reward structure,
+# state-revisit rate.  Seconds per game, and the baselines every cross-game
+# score is measured against.
+python benchmarks/game_descriptors.py
+
+# One experiment; add --seeds 2,3 to replicate, --dry-run to print commands
+python benchmarks/exp_h021_currency_by_game.py --seeds 1,2,3
+
+# Per-(game, trainer) slopes with error bars, for any slope-shaped experiment
+python benchmarks/analyze_slopes.py h021_currency_by_game h023_budget_tier
+
+# Hypotheses, findings and the rendered journal
+python benchmarks/journal.py hypothesis "..." --why "..."
+python benchmarks/journal.py finding "..." --claim "..." --confidence high
+python benchmarks/journal.py render
+```
+
+Three conventions are worth keeping, all of them learned the hard way and all
+recorded with the evidence in `JOURNAL.md`:
+
+**Score above the random baseline, never raw.** Krull pays a random agent 1,634
+and Breakout 1.3, so a log ratio of raw returns is mostly a ratio of baselines,
+compressed by a different factor in every game. `game_descriptors.py` measures
+those baselines; nothing cross-game should be read without them.
+
+**Form contrasts within a seed, then average.** Averaging scores across seeds
+first and taking one log ratio of the means collapses when any seed finishes
+below the baseline — on Krull one of three does, which gave that cell an error
+of ±17 under the wrong order.
+
+**Three seeds, always.** Across sixteen contrasts that now have them, five
+change sign between the seed-1 value and the multi-seed mean: a 31% sign-error
+rate, on runs that cost 45–200 seconds each. Four conclusions in this journal
+were retracted by replication, so a one-seed number is a hypothesis, not a
+result.
+
+Experiments that change per-step GPU work go through `guard_spec` in
+`exp_runner.py`. A configuration authored here once bugchecked the host with a
+Windows display-watchdog timeout; the cap is on the replay ratio, which is the
+learner-to-emulator work ratio and the only quantity that separated the cell
+that crashed from the cells that had run for hours. See the comment there before
+raising it.

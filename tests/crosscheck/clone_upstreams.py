@@ -29,6 +29,9 @@ REPOS = {
         ["munchausen_rl", "bigger_better_faster"],
     ),
     "relative-value-learning": ("https://github.com/Hauf3n/relative-value-learning.git", None),
+    # PPO-EWMA (Hilton et al. 2022), the analysis instrument the RLJ 2026
+    # scaling paper builds on; cleanrl/ppo_scale_atari.py is diffed against it.
+    "ppo-ewma": ("https://github.com/openai/ppo-ewma.git", None),
     # World models. dreamerv3-torch is the PyTorch reproduction the DreamerV3
     # cross-check runs against; danijar/dreamerv3 itself is JAX.
     "dreamerv3-torch": ("https://github.com/NM512/dreamerv3-torch.git", None),

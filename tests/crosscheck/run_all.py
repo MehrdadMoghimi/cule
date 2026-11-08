@@ -25,6 +25,7 @@ CHECKS = {
     "dopamine": ("check_dopamine.py", "google/dopamine (JAX/Flax, needs .venv-jax)"),
     "rv": ("check_rv.py", "Hauf3n/relative-value-learning (PyTorch)"),
     "dreamer": ("check_dreamer.py", "NM512/dreamerv3-torch (PyTorch)"),
+    "ppo_scale": ("check_ppo_scale.py", "openai/ppo-ewma (PyTorch)"),
 }
 
 

@@ -80,6 +80,7 @@ torch.set_float32_matmul_precision("high")
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from cule_env import (
+    make_cule_env,
     CuLEVectorEnv,
     done_tensor,
     frame_stack_observation,
@@ -510,7 +511,7 @@ if __name__ == "__main__":
         env_device = resolve_cule_device(args.cule_device, device, args.num_envs)
         if args.capture_video:
             raise ValueError("CuLE backend does not support CleanRL video capture")
-        envs = CuLEVectorEnv(
+        envs = make_cule_env(
             args.env_id, args.num_envs, env_device, seed=args.seed, clip_rewards=args.clip_rewards
         )
     elif args.env_backend == "envpool":

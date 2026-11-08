@@ -69,6 +69,9 @@ class Args:
     """environment backend: `cule` or `gymnasium`"""
     cule_device: str = "auto"
     """CuLE device; auto uses CUDA for 32+ envs and CPU for smaller batches"""
+    clip_rewards: bool = True
+    """clip the learning reward to its sign, as in Mnih et al. 2015; reported
+    episode returns are always the raw game score either way"""
     track: bool = False
     """if toggled, track the experiment with Weights and Biases"""
 
@@ -101,6 +104,11 @@ class Args:
     """the number of collected transitions before learning starts"""
     learner_updates_per_vector_step: float = 1.0
     """gradient updates accrued per vector environment step; may be fractional"""
+    replay_ratio_final: float | None = None
+    """if set, the replay ratio ramps linearly from `replay_ratio` to this value
+    over the run instead of staying constant; the mean of the two is what fixes
+    the total optimizer-step count, so a ramp with the same mean as a constant
+    does the same total work and differs only in when it does it"""
     replay_ratio: float | None = 1.0
     """sampled replay items per collected transition; overrides learner-updates-per-vector-step"""
 
@@ -230,7 +238,8 @@ if __name__ == "__main__":
 
     if args.env_backend == "cule":
         env_device = resolve_cule_device(args.cule_device, device, args.num_envs)
-        envs = make_cule_env(args.env_id, args.num_envs, env_device, args.seed, args.capture_video)
+        envs = make_cule_env(args.env_id, args.num_envs, env_device, args.seed,
+                             args.capture_video, clip_rewards=args.clip_rewards)
     elif args.env_backend == "gymnasium":
         envs = gym.vector.SyncVectorEnv(
             [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
@@ -430,7 +439,22 @@ if __name__ == "__main__":
             desc = f", episodic_return={sum(avg_returns) / len(avg_returns):.2f}"
 
         if global_step > args.learning_starts and len(rb) >= args.batch_size:
-            update_budget += args.learner_updates_per_vector_step
+            if args.replay_ratio_final is None:
+                update_budget += args.learner_updates_per_vector_step
+            else:
+                # The ramp spans the LEARNING period, not the whole run.  Over
+                # the whole run it would not: no updates happen before
+                # `learning_starts`, so a rising ramp would skip its cheapest
+                # phase and a falling one its most expensive, leaving the two
+                # 11% apart in total optimizer steps -- a confound pointing the
+                # same way as the effect being tested.  Measured over the
+                # learning period, the mean of a linear ramp is exactly
+                # (start + end) / 2 and a ramp matches the constant of that mean.
+                span = max(1, args.total_timesteps - args.learning_starts)
+                progress = min(1.0, max(0.0, (global_step - args.learning_starts) / span))
+                ramped = (args.replay_ratio
+                          + (args.replay_ratio_final - args.replay_ratio) * progress)
+                update_budget += ramped * args.num_envs / args.batch_size
             num_updates = int(update_budget)
             update_budget -= num_updates
             for _ in range(num_updates):
@@ -452,11 +476,13 @@ if __name__ == "__main__":
             while next_evaluation_step <= global_step:
                 next_evaluation_step += args.evaluation_interval
 
-                if measure_start_time is None and learner_updates >= args.measure_burnin:
-                    if device.type == "cuda":
-                        torch.cuda.synchronize(device)
-                    measure_start_time = time.time()
-                    measure_start_step = global_step
+        # Belongs to the step loop, not to the evaluation branch: nested inside
+        # it the progress display only ever appeared under --learning-curve-path.
+        if measure_start_time is None and learner_updates >= args.measure_burnin:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            measure_start_time = time.time()
+            measure_start_step = global_step
 
         if not args.benchmark and measure_start_time is not None and global_step % max(args.num_envs * 100, 1) == 0:
             speed = (global_step - measure_start_step) / max(time.time() - measure_start_time, 1e-9)

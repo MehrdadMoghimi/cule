@@ -57,6 +57,8 @@ graph TD
     PPO --> DPO["<b>dpo_atari</b> ●<br/>discovered drift function<br/>replaces the clip"]
     PPO --> OUTERPPO["<b>outer_ppo_atari</b> ●<br/>outer LR + Nesterov<br/>on the net update vector"]
     PPO --> GPG["<b>gpg_atari</b> ●<br/>critic-free, group baseline<br/>first-visit binned returns"]
+    PPO --> PPOSCALE["<b>ppo_scale_atari</b> ☆<br/>PPO-EWMA proximal policy<br/>fixed-size minibatches, DDR"]
+    OUTERPPO -.both retime the outer loop.-> PPOSCALE
     PQN --> SEMPQN["<b>sem_pqn_atari_envpool</b> ●<br/>simplicial embedding trunk<br/>group-wise softmax"]
     HADAMAX -.same parent, other axis.-> SEMPQN
 
@@ -74,7 +76,7 @@ graph TD
 ```
 
 ★ = added in the earlier pass.  ☆ = 2026 papers added later; see
-"The three 2026 papers" below.  ● = the on-policy family, added last; see
+"The 2026 papers" below.  ● = the on-policy family, added last; see
 "The on-policy family" below.
 
 ## The on-policy family
@@ -389,11 +391,11 @@ tautology, and every published array's shape is separately asserted to pin one
 architectural constant. A JAX/rlax cross-check runs too, if those happen to be
 installed.
 
-## The three 2026 papers
+## The 2026 papers
 
-Three papers published after the pass above, implemented from the papers
-themselves. All three had public code, contrary to what an abstract-only survey
-suggested: two repositories exist and one is still empty.
+Papers published after the pass above, implemented from the papers themselves.
+The first three all had public code, contrary to what an abstract-only survey
+suggested: two repositories exist and one was still empty at the time.
 
 ### `ibdqn_atari` ← `dqn_atari`
 
@@ -457,6 +459,54 @@ squared error, to offset the pessimism of n-step returns collected under older
 policies; `a_{t+n}` is the stored action rather than the argmax, because only
 the stored one is anchored.
 
+### `ppo_scale_atari` ← `ppo_atari`
+
+"Preventing Learning Stagnation in PPO by Scaling to 1 Million Parallel
+Environments", Beukman, Khetarpal, Zheng, Dabney, Foerster, Dennis & Lyle,
+RLJ/RLC 2026.
+
+**Inherits** all of PPO: the Nature CNN, GAE, the clipped surrogate, the value
+clipping, the entropy bonus, the rollout loop.
+
+**Changes** nothing about the objective by default. The paper is a diagnosis, not
+a loss: model PPO's *outer* loop (rollout → epochs → new rollout) as ordinary
+stochastic optimisation, and a plateau becomes the RL twin of SGD at too large a
+learning rate. The tell is that the loss stops falling while the gradient norm
+and the update magnitude stay large — the iterate thrashes around a local
+optimum instead of converging. Figure 3 makes that testable: raise the
+regularisation on a plateaued agent and it resumes learning immediately; lower it
+again and it drops straight back.
+
+Three separable mechanisms come out of that, and the file implements all three.
+
+| | |
+|---|---|
+| **PPO-EWMA** (`--proximal-com`) | PPO's behaviour policy is both the importance-sampling denominator *and* the reference the clip regularises towards. Hilton et al. 2022 split them; the paper adopts that as its analysis instrument. `pi_prox` is an EWMA of the weights refreshed after **every minibatch**, and its centre of mass `COM = 1/(1-beta) - 1` — the age of the reference in minibatch steps — is the direct handle on the outer step size. Off by default, since the paper's own Section 5 results use standard PPO |
+| **The scaling recipe** (`--minibatch-size`) | Of the three ways to partition a bigger rollout, holding the *inner* optimisation fixed wins: keep the learning rate and the minibatch **size**, let the minibatch **count** grow. So the file is parameterised by size and derives the count, which is the opposite of every other PPO file here. `--num-minibatches` still pins the count, to reproduce the losing arm of Figure 9 |
+| **DDR** (logged) | Data to Divergence Ratio: data points per unit KL from the behaviour policy, collapsing both levers onto one axis. Low DDR predicts an early plateau, high predicts learning too slowly to reach the ceiling in budget — and the optimum **moves right as the budget grows**, which is why a configuration tuned at 100M steps stagnates at 10B |
+
+Two things are worth stating plainly.
+
+The debiased EWMA is not the recursion the paper prints. The paper writes
+`theta_prox <- beta*theta_prox + (1-beta)*theta`; the reference implementation
+tracks accumulated weight instead, so the average is exact from the first step
+rather than anchored to the initialisation. At the COMs the paper actually uses
+(1024, 4096) the naive form takes tens of thousands of minibatch steps to forget
+its initial weights — precisely the early training the plateau analysis is about.
+The port follows the code, and a test asserts the two forms differ early and
+converge late.
+
+DDR's normalisation is not written down anywhere. The paper defines it in words
+and never gives the formula, and Figure 8's absolute range does not pin it down.
+The file takes the whole rollout as the data and the end-of-inner-loop
+behaviour-policy KL as the divergence, and logs `losses/kl_behaviour` next to
+`charts/ddr` so any other normalisation is recoverable from the logs. That is a
+reading, not a transcription, and it is marked as one in the header.
+
+At the defaults the file *is* `ppo_atari.py` — no EWMA, and `--minibatch-size
+256` at 8 envs × 128 steps is the parent's 4 minibatches. As with
+`outer_ppo_atari`, the load-bearing test is that reduction, bit-exactly.
+
 ## Cross-checks against the official implementations
 
 Every port whose upstream can be executed is diffed against that upstream by
@@ -478,6 +528,7 @@ python tests/crosscheck/run_all.py            # cpu + cuda
 | Hadamax | jacobkooi/hadamax (JAX/Flax) | their `QNetwork` params loaded into ours | **12/12**, ≤1e-5 |
 | QR-DQN loss | google/dopamine (JAX/Flax) | their real `quantile_agent.train` | **8/8**, ≤2.4e-7 |
 | PPO+RV | Hauf3n/relative-value-learning (PyTorch) | their agent, R-GAE, targets and pair sampler run beside ours | **28/28**, ≤1.4e-6 |
+| PPO-scale | openai/ppo-ewma (PyTorch) | their real `ppg.EwmaModel` and `ppo.compute_losses` executed beside ours | **56/56**, bit-exact on CPU |
 | IB-DQN / IB-IQN | — | no repository (the paper's `me_layer` link 404s) | asserted against the paper's Appendix D listing |
 | Endpoint Replay | panahiparham/endpoint-replay | repository is empty until 2026-08-15 | properties asserted, no numerical diff |
 | R2D2 | — | DeepMind never released code | nothing to run against |
@@ -651,6 +702,7 @@ licence permits redistribution:
 | BTR | MIT | source transcribed into `tests/reference/btr_reference.py`, diffed numerically |
 | Hadamax | Apache-2.0 | Flax module transcribed to NumPy in `tests/reference/hadamax_reference.py` |
 | DiscoRL | Apache-2.0 | Haiku modules transcribed to NumPy in `tests/reference/disco_reference.py`; the published `disco_103.npz` is downloaded at runtime, never vendored |
+| ppo-ewma | MIT | no code copied; `check_ppo_scale.py` imports and executes the clone, stubbing only the procgen/gym3/MPI imports the two functions under test never reach |
 | **streaming-drl** | **CC BY-NC 4.0** | **no code copied or vendored**; tested against the paper's published equations (both stream Q and stream AC) |
 | R2D2 | no code was ever released | reimplemented from the paper; tested against its stated formulas |
 | **MR.Q** | **CC BY-NC 4.0** | **no code copied or vendored**; every test states the reference behaviour independently |

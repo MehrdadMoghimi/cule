@@ -115,6 +115,15 @@ class Args:
     """the number of collected transitions before learning starts"""
     learner_updates_per_vector_step: float = 1.0
     """gradient updates accrued per vector environment step; may be fractional"""
+    replay_ratio_final: float | None = None
+    """if set, the replay ratio ramps linearly from `replay_ratio` to this value
+    across the LEARNING period instead of staying constant.  The mean of the two
+    endpoints fixes the total optimizer-step count, so a ramp and a constant of
+    that mean do the same total work and differ only in when they do it.  The
+    ramp deliberately spans `total_timesteps - learning_starts` rather than the
+    whole run: nothing trains before `learning_starts`, so a whole-run ramp would
+    skip its own cheapest phase and leave a rising and a falling arm 11% apart in
+    total updates -- a confound pointing the same way as the effect being tested"""
     replay_ratio: float | None = 1.0
     """sampled replay items per collected transition; overrides learner-updates-per-vector-step"""
     max_training_seconds: float = 0.0
@@ -387,7 +396,14 @@ if __name__ == "__main__":
             solved = episode_stats.update(infos, global_step, writer)
 
         if global_step > args.learning_starts and len(rb) >= args.batch_size:
-            update_budget += args.learner_updates_per_vector_step
+            if args.replay_ratio_final is None:
+                update_budget += args.learner_updates_per_vector_step
+            else:
+                span = max(1, args.total_timesteps - args.learning_starts)
+                progress = min(1.0, max(0.0, (global_step - args.learning_starts) / span))
+                ramped = (args.replay_ratio
+                          + (args.replay_ratio_final - args.replay_ratio) * progress)
+                update_budget += ramped * args.num_envs / args.batch_size
             num_updates = int(update_budget)
             update_budget -= num_updates
             for _ in range(num_updates):

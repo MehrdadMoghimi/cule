@@ -7,12 +7,17 @@ CleanRL or LeanRL code is reused here.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import gymnasium as gym
 import numpy as np
 import torch
 
+from diagnostic_env import (
+    is_diagnostic_env_id,
+    make_diagnostic_env,
+)
 from torchcule.atari import Env as AtariEnv
 
 
@@ -42,13 +47,41 @@ class CuLEVectorEnv:
         self.num_envs = num_envs
         self.frame_stack = frame_stack
         self.clip_rewards = clip_rewards
-        self.stats_interval = max(1, stats_interval)
+        # Episode statistics are logging only, so how often they are flushed is a
+        # measurement choice rather than an algorithmic one: a short experiment
+        # needs a denser learning curve than the default batching provides, and a
+        # long one wants fewer host synchronizations.
+        self.stats_interval = max(1, int(os.environ.get("CULE_STATS_INTERVAL", stats_interval)))
         # sync_step=False steps the backend asynchronously; results are still
         # stream-ordered for GPU consumers, and the periodic episode-stat flush
         # (a .cpu() read) is the only host-side reader.
         self.sync_step = sync_step
         self._step_count = 0
 
+        # CuLE is asked for `episodic_life=False` whatever the caller wants, and
+        # the life-loss terminal is reconstructed here instead.  The reason is
+        # that CuLE's done buffer is `FLAG_ALE_TERMINAL || (episodic_life &&
+        # lost_life)`, which conflates the two, and the game-over half is the
+        # only one that can end an episode -- so with `episodic_life=True` there
+        # is no signal left that says "the game actually ended".
+        #
+        # This used to be recovered as `terminated & lives.eq(0)`, which is a
+        # fact about Breakout and not about Atari.  Measured under a random
+        # policy: Breakout does read 0 lives at game over, but Qbert reads 254
+        # (its life counter underflows), Seaquest and Krull read 1, and for
+        # Seaquest that value is indistinguishable from an ordinary life loss.
+        # The effect was that seven of eighteen games tested -- Qbert, Seaquest,
+        # Krull, Asterix, MsPacman, BeamRider, Frostbite -- reported *no
+        # episodes at all*, so every learning curve on them was empty and every
+        # score derived from one was None.
+        #
+        # Reconstructing instead of fixing it up is safe because the console
+        # reset does not depend on this flag: `reset_functor` in
+        # `cule/atari/functors.hpp` resets a state only on FLAG_ALE_TERMINAL,
+        # never on the done buffer.  So the emulator behaves identically either
+        # way and only the reporting changes -- which keeps every score already
+        # recorded in `benchmark_results` comparable.
+        self.episodic_life = episodic_life
         self.env = AtariEnv(
             env_id,
             num_envs=num_envs,
@@ -57,7 +90,7 @@ class CuLEVectorEnv:
             rescale=True,
             frameskip=4,
             repeat_prob=0.0,
-            episodic_life=episodic_life,
+            episodic_life=False,
             max_noop_steps=30,
         )
         self.env.train(frameskip=4)
@@ -86,6 +119,7 @@ class CuLEVectorEnv:
         self._returned_returns = torch.zeros_like(self._episode_returns)
         self._returned_lengths = torch.zeros_like(self._episode_lengths)
         self._pending_episodes = torch.zeros(num_envs, device=self.device, dtype=torch.bool)
+        self._prev_lives = torch.zeros(num_envs, device=self.device, dtype=torch.int32)
         self._seed = seed
 
     def _seeds(self, seed: int | None) -> torch.Tensor:
@@ -117,6 +151,7 @@ class CuLEVectorEnv:
         self._episode_returns.zero_()
         self._episode_lengths.zero_()
         self._pending_episodes.zero_()
+        self._prev_lives.fill_(2 ** 31 - 1)   # first step can never look like a life loss
         return self._obs_view(), {}
 
     def _flush_episode_infos(self) -> dict[str, Any]:
@@ -143,14 +178,21 @@ class CuLEVectorEnv:
         self, actions: torch.Tensor | np.ndarray
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
         actions = torch.as_tensor(actions, device=self.device).reshape(self.num_envs)
-        observations, rewards, terminated, raw_info = self.env.step(
+        observations, rewards, game_over, raw_info = self.env.step(
             actions, asyn=not self.sync_step
         )
         frame = self._gray_frame(observations)
 
+        # `game_over` as returned is FLAG_ALE_TERMINAL alone; a life loss is a
+        # decrease in the lives counter, which is well defined in every game
+        # whatever absolute value the counter happens to take.
+        lives = raw_info["ale.lives"]
+        lost_life = lives.lt(self._prev_lives)
+        self._prev_lives.copy_(lives)
+        terminated = game_over | lost_life if self.episodic_life else game_over
+
         self._episode_returns.add_(rewards)
         self._episode_lengths.add_(1)
-        game_over = terminated & raw_info["ale.lives"].eq(0)
         self._returned_returns.copy_(
             torch.where(game_over, self._episode_returns, self._returned_returns)
         )
@@ -184,10 +226,19 @@ def make_cule_env(
     seed: int,
     capture_video: bool = False,
     frame_stack: int = 4,
-) -> CuLEVectorEnv:
+    **kwargs: Any,
+):
     if capture_video:
         raise ValueError("CuLE backend does not support CleanRL video capture")
-    return CuLEVectorEnv(env_id, num_envs, device, seed=seed, frame_stack=frame_stack)
+    # A diagnostic env id routes to the closed-form MDP of `diagnostic_env`.
+    # It presents the identical interface, so every trainer gets the correctness
+    # harness without a per-trainer flag.  Trainers that used to construct
+    # `CuLEVectorEnv` directly now come through here too, which is why the extra
+    # keywords (`clip_rewards` and friends) are forwarded rather than dropped.
+    if is_diagnostic_env_id(env_id):
+        return make_diagnostic_env(
+            env_id, num_envs, device, seed=seed, frame_stack=frame_stack, **kwargs)
+    return CuLEVectorEnv(env_id, num_envs, device, seed=seed, frame_stack=frame_stack, **kwargs)
 
 
 def resolve_cule_device(
